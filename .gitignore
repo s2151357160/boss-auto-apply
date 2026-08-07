@@ -1,0 +1,37 @@
+# Build artifacts
+build/
+dist/
+dist_obf/
+nuitka_build/
+nuitka_dist/
+boss.spec
+
+# Encrypted/compiled variants
+boss_gui_enc.py
+boss_gui.c
+boss_gui_obf.py
+
+# Dependencies bundled into exe
+libs/
+platform-tools/
+platform-tools.zip
+
+# PyInstaller / UPX
+upx.exe
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Temp / debug files
+.temp/
+debug_green_filtered.png
+screenshot.png
+log.txt
+pyarmor.bug.log
+nuitka-crash-report.xml
+
+# Runtime generated files
+boss_config.json
+投递日志.txt
