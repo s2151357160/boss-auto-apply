@@ -1,34 +1,24 @@
 # boss_ocr.py
-# 功能：ADB截图 → 裁剪上半部分 → RapidOCR识别文字
+# 功能：截图 → 裁剪上半部分 → RapidOCR识别文字
+# 注意：截图和设备操作已迁移到 device_driver.py，由 boss_gui.py 统一调用
+# 本文件仅保留裁剪和OCR功能，供独立测试使用
 
 import os
-import subprocess
 import cv2
 from rapidocr_onnxruntime import RapidOCR
 
-# ADB路径
-ADB_PATH = r"C:\Users\Administrator\Desktop\2.0\platform-tools\adb.exe"
 # 截图保存路径
-SCREENSHOT_PATH = r"C:\Users\Administrator\Desktop\2.0\screenshot.png"
-CROP_PATH = r"C:\Users\Administrator\Desktop\2.0\screenshot_top.png"
+SCREENSHOT_PATH = os.path.join(os.environ.get("TEMP", os.path.dirname(os.path.abspath(__file__))), "boss_screenshot.png")
+CROP_PATH = os.path.join(os.environ.get("TEMP", os.path.dirname(os.path.abspath(__file__))), "screenshot_top.png")
 
 
-def adb_screenshot():
-    """ADB截图并拉取到本地"""
-    # 手机端截图
-    subprocess.run([ADB_PATH, "shell", "screencap", "-p", "/sdcard/screenshot.png"], check=True)
-    # 拉取到本地
-    subprocess.run([ADB_PATH, "pull", "/sdcard/screenshot.png", SCREENSHOT_PATH], check=True)
-    # 删除手机端截图
-    subprocess.run([ADB_PATH, "shell", "rm", "/sdcard/screenshot.png"])
-
-
-def crop_top_half(image_path, save_path):
+def crop_top_half(image_path, save_path=None):
     """裁剪图片上半部分"""
     img = cv2.imread(image_path)
     h, w = img.shape[:2]
     top_half = img[:h//2, :]
-    cv2.imwrite(save_path, top_half)
+    if save_path:
+        cv2.imwrite(save_path, top_half)
     return top_half
 
 
@@ -45,9 +35,12 @@ def ocr_recognize(image_path):
 
 
 if __name__ == "__main__":
-    print("正在截图...")
-    adb_screenshot()
-    print("正在裁剪上半部分...")
-    crop_top_half(SCREENSHOT_PATH, CROP_PATH)
-    print("正在OCR识别...")
-    ocr_recognize(CROP_PATH)
+    print("注意：截图功能已迁移到 device_driver.py，请通过 boss_gui.py 使用")
+    print("如需独立测试，请先手动截图保存到:", SCREENSHOT_PATH)
+    if os.path.isfile(SCREENSHOT_PATH):
+        print("正在裁剪上半部分...")
+        crop_top_half(SCREENSHOT_PATH, CROP_PATH)
+        print("正在OCR识别...")
+        ocr_recognize(CROP_PATH)
+    else:
+        print("截图文件不存在，请先截图")

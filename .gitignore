@@ -34,4 +34,4 @@ nuitka-crash-report.xml
 
 # Runtime generated files
 boss_config.json
-投递日志.txt
+投递日志/

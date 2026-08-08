@@ -22,7 +22,6 @@ else:
     WORK_DIR = os.path.dirname(os.path.abspath(__file__))
 
 import re
-import subprocess
 import threading
 import time
 import random
@@ -33,32 +32,19 @@ import numpy as np
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from rapidocr_onnxruntime import RapidOCR
+from device_driver import create_driver, PLATFORM_OPTIONS
 
 # ============ 配置 ============
 # WORK_DIR 已在文件顶部根据frozen/脚本模式设置
-# ADB路径查找优先级：_MEIPASS(单文件解压) > exe同级目录 > 脚本目录
-if getattr(sys, 'frozen', False):
-    if hasattr(sys, '_MEIPASS') and os.path.isfile(os.path.join(sys._MEIPASS, "platform-tools", "adb.exe")):
-        ADB_PATH = os.path.join(sys._MEIPASS, "platform-tools", "adb.exe")
-    else:
-        ADB_PATH = os.path.join(WORK_DIR, "platform-tools", "adb.exe")
-else:
-    ADB_PATH = os.path.join(WORK_DIR, "platform-tools", "adb.exe")
 SCREENSHOT_PATH = os.path.join(os.environ.get("TEMP", WORK_DIR), "boss_screenshot.png")
 SUBPROC_FLAGS = 0x08000000  # CREATE_NO_WINDOW，隐藏命令行窗口
 
-# 弹窗关键词，命中任一则停止投递
 POPUP_KEYWORDS = ["今日投递上限", "投递上限", "请先完善简历", "完善简历", "操作频繁", "账号异常"]
 
-# 墨绿色按钮HSV范围（基于实测: H≈90, S≈225, V≈180）
 GREEN_HSV_MIN = (80, 100, 130)
 GREEN_HSV_MAX = (110, 255, 255)
 
-# 全局OCR实例，只初始化一次
 _ocr_engine = None
-
-# 屏幕分辨率缓存
-_screen_size = None
 
 def _get_ocr():
     global _ocr_engine
@@ -67,107 +53,45 @@ def _get_ocr():
     return _ocr_engine
 
 
-# ============ ADB操作 ============
+# ============ 设备操作（统一驱动接口） ============
 
-# ADB命令超时（秒）
-ADB_TIMEOUT = 15
-ADB_SHORT_TIMEOUT = 5
+_driver = None  # 全局设备驱动实例（由 BossGUI._apply_platform 创建）
 
 
-def _adb_check():
-    """检查ADB是否可用，返回 (ok, msg)"""
-    if not os.path.isfile(ADB_PATH):
-        return False, f"ADB未找到: {ADB_PATH}"
-    try:
-        r = subprocess.run([ADB_PATH, "devices"], capture_output=True, text=True,
-                           timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
-        # 检查是否有已连接设备（排除"daemon"行和空行）
-        devices = []
-        for line in r.stdout.strip().split("\n")[1:]:
-            line = line.strip()
-            if line and "device" in line and "unauthorized" not in line and "daemon" not in line:
-                devices.append(line.split("\t")[0])
-        if not devices:
-            return False, "未检测到手机连接，请检查USB线和USB调试"
-        return True, f"已连接: {devices[0]}"
-    except subprocess.TimeoutExpired:
-        return False, "ADB命令超时，请重启ADB或重新插拔USB"
-    except Exception as e:
-        return False, f"ADB检查失败: {e}"
+def _set_driver(driver):
+    """设置全局设备驱动实例"""
+    global _driver
+    _driver = driver
+
+
+def _device_check():
+    """检查设备连接，返回 (ok, msg)"""
+    return _driver.check_connection()
 
 
 def adb_screenshot(max_retry=3):
-    """ADB截图，失败自动重试"""
-    for i in range(max_retry):
-        try:
-            subprocess.run([ADB_PATH, "shell", "screencap", "-p", "/sdcard/screenshot.png"],
-                          check=True, timeout=ADB_TIMEOUT, creationflags=SUBPROC_FLAGS)
-            subprocess.run([ADB_PATH, "pull", "/sdcard/screenshot.png", SCREENSHOT_PATH],
-                          check=True, timeout=ADB_TIMEOUT, creationflags=SUBPROC_FLAGS)
-            subprocess.run([ADB_PATH, "shell", "rm", "/sdcard/screenshot.png"],
-                          timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
-            return
-        except subprocess.TimeoutExpired:
-            if i < max_retry - 1:
-                time.sleep(1)
-                # 重连ADB
-                try:
-                    subprocess.run([ADB_PATH, "kill-server"], timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
-                except Exception:
-                    pass
-                try:
-                    subprocess.run([ADB_PATH, "start-server"], timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
-                except Exception:
-                    pass
-                time.sleep(2)
-            else:
-                raise TimeoutError(f"ADB截图超时({max_retry}次重试均失败)，请检查USB连接")
-        except subprocess.CalledProcessError as e:
-            if i < max_retry - 1:
-                time.sleep(1)
-                try:
-                    subprocess.run([ADB_PATH, "kill-server"], timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
-                except Exception:
-                    pass
-                try:
-                    subprocess.run([ADB_PATH, "start-server"], timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
-                except Exception:
-                    pass
-                time.sleep(2)
-            else:
-                raise ConnectionError(f"ADB截图失败({max_retry}次重试均失败): {e}")
+    """截图并保存到本地，失败自动重试"""
+    ok, msg = _driver.screenshot(SCREENSHOT_PATH, max_retry=max_retry)
+    if not ok:
+        if "超时" in msg:
+            raise TimeoutError(msg)
+        else:
+            raise ConnectionError(msg)
 
 
 def adb_tap(x, y, offset=10):
     """随机偏移点击，坐标下限保护"""
-    rx = max(0, x + random.randint(-offset, offset))
-    ry = max(0, y + random.randint(-offset, offset))
-    subprocess.run([ADB_PATH, "shell", "input", "tap", str(rx), str(ry)],
-                   timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
+    _driver.tap(x, y, offset)
 
 
 def adb_swipe(x1, y1, x2, y2, duration=300):
     """滑动操作"""
-    subprocess.run([ADB_PATH, "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)],
-                   timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
+    _driver.swipe(x1, y1, x2, y2, duration)
 
 
 def adb_get_screen_size():
-    """获取屏幕分辨率（缓存结果，只查一次ADB）"""
-    global _screen_size
-    if _screen_size is not None:
-        return _screen_size
-    try:
-        result = subprocess.run([ADB_PATH, "shell", "wm", "size"], capture_output=True, text=True,
-                                timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
-        match = re.search(r'(\d+)x(\d+)', result.stdout)
-        if match:
-            _screen_size = (int(match.group(1)), int(match.group(2)))
-    except Exception:
-        pass
-    if _screen_size is None:
-        _screen_size = (1080, 2400)
-    return _screen_size
+    """获取屏幕分辨率（缓存结果）"""
+    return _driver.get_screen_size()
 
 
 # ============ 兼容中文/空格路径的图像读取 ============
@@ -317,7 +241,7 @@ class BossGUI:
     # 配置和日志保存到exe同级目录
     _DATA_DIR = WORK_DIR
     CONFIG_FILE = os.path.join(_DATA_DIR, "boss_config.json")
-    LOG_FILE = os.path.join(_DATA_DIR, "投递日志.txt")
+    LOG_DIR = os.path.join(_DATA_DIR, "投递日志")  # 日志文件夹
 
     def __init__(self, root):
         self.root = root
@@ -325,9 +249,12 @@ class BossGUI:
         self.root.geometry("850x650")
         self.root.resizable(True, True)
         self._stop_event = threading.Event()  # 线程安全的停止信号
+        self._success_log_path = ""  # 当前投递成功日志路径
+        self._fail_log_path = ""     # 当前投递失败日志路径
 
         self._build_ui()
         self._load_config()
+        self._apply_platform()  # 根据配置初始化驱动
         self._preload_ocr()  # 后台预加载OCR模型
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -335,6 +262,17 @@ class BossGUI:
         # ---- 设置区 ----
         frame_settings = ttk.LabelFrame(self.root, text="筛选设置（留空则不执行该条件）")
         frame_settings.pack(fill="x", padx=10, pady=5)
+
+        # ---- 平台选择 ----
+        row0 = ttk.Frame(frame_settings)
+        row0.pack(fill="x", padx=5, pady=3)
+        ttk.Label(row0, text="手机平台:").pack(side="left")
+        self.platform_var = tk.StringVar(value="android")
+        platform_names = [label for _, label in PLATFORM_OPTIONS]
+        self.platform_combo = ttk.Combobox(row0, textvariable=self.platform_var,
+                                           values=platform_names, state="readonly", width=12)
+        self.platform_combo.pack(side="left", padx=5)
+        self.platform_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_platform())
 
         # 薪资
         row1 = ttk.Frame(frame_settings)
@@ -407,6 +345,20 @@ class BossGUI:
         self.result_text = scrolledtext.ScrolledText(frame_result, wrap="word", font=("Consolas", 10))
         self.result_text.pack(fill="both", expand=True)
 
+    def _apply_platform(self):
+        """根据GUI下拉框选择切换设备驱动"""
+        platform_label = self.platform_var.get()
+        # 从显示标签反查平台ID
+        platform_id = "android"
+        for pid, plabel in PLATFORM_OPTIONS:
+            if plabel == platform_label:
+                platform_id = pid
+                break
+        driver = create_driver(platform_id)
+        _set_driver(driver)
+        tool_name = "ADB" if platform_id == "android" else "HDC"
+        self._set_status(f"已切换到 {platform_label}，{tool_name}路径: {driver.adb_path if hasattr(driver, 'adb_path') else driver.hdc_path}")
+
     def log(self, msg):
         self.root.after(0, self._append_log, msg)
 
@@ -424,8 +376,15 @@ class BossGUI:
         help_text.pack(fill="both", expand=True, padx=5, pady=5)
 
         content = """\
-一、筛选设置
+一、平台选择
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
+[手机平台]  选择安卓或鸿蒙，切换后自动保存，下次启动恢复上次选择。
+  安卓 (ADB)：通过ADB控制安卓手机，需开启USB调试。
+  鸿蒙 (HDC)：通过HDC控制鸿蒙手机，需开启开发者模式。
+  注意：纯血鸿蒙NEXT不支持ADB，必须选择鸿蒙(HDC)。
+
+二、筛选设置
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [最低薪资(K)]  填数字，如 15 表示最低15K。留空 = 不限制最低薪资。
 
 [最高薪资(K)]  填数字，如 25 表示最高25K。留空 = 不限制最高薪资。
@@ -454,38 +413,40 @@ class BossGUI:
 [投递次数]  目标投递成功数量（跳过的不算）。
             达到该数量后自动停止。
 
-二、功能按钮
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+三、功能按钮
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [截图并识别]  对手机当前屏幕截图并OCR识别，显示岗位信息、
               薪资、关键词筛选结果。用于手动预览，不会投递。
 
 [开始投递]  启动自动投递循环：
               识别 -> 关键词过滤 -> 薪资筛选 -> 去重检查
-              -> 检测"立即沟通" -> 点击 -> 验证聊天页
-              -> 返回 -> 滑下一个，循环直到投递次数达标。
+              -> 检测"立即沟通" -> 点击投递 -> 返回 -> 滑下一个，循环直到投递次数达标。
 
 [停止投递]  手动停止投递循环，当前步骤完成后停止。
 
 [清空日志]  清空下方识别结果文本区的内容。
 
-三、自动防风控机制
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+四、自动防风控机制
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 每次点击带随机 +/-10 像素偏移
 - 每次识别后 1/5 概率随机上滑一次
 - 每投递10家随机休息 5~10 秒
 - 延迟自带随机波动
 
-四、自动停止条件
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+五、自动停止条件
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 达到投递次数目标
 - 连续3次识别到同一岗位（列表到底）
 - 检测到弹窗关键词（投递上限/操作频繁/账号异常等）
 - 手动点击"停止投递"
 
-五、数据存储
+六、数据存储
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 配置自动保存到 boss_config.json，下次启动自动恢复
-- 投递记录保存到 投递日志.txt，追加写入
+- 投递日志按时间戳命名，保存在"投递日志"文件夹下：
+  · XXXXXXXX_HHMMSS_投递成功日志.txt（仅记录投递成功的岗位）
+  · XXXXXXXX_HHMMSS_投递失败日志.txt（记录跳过、重复等未投递的岗位）
+- 每次执行投递自动创建新日志文件，历史日志保留不覆盖
 """
 
         help_text.insert("1.0", content)
@@ -515,6 +476,7 @@ class BossGUI:
             "delay": self.delay_entry.get(),
             "random_delay": self.random_delay_entry.get(),
             "deliver_count": self.deliver_count_entry.get(),
+            "platform": self.platform_var.get(),
         }
         try:
             with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -542,6 +504,9 @@ class BossGUI:
                     val = str(cfg[key]) if cfg[key] is not None else ""
                     entry.delete(0, "end")
                     entry.insert(0, val)
+            # 恢复平台选择
+            if "platform" in cfg:
+                self.platform_var.set(str(cfg["platform"]))
         except Exception:
             pass
 
@@ -588,10 +553,10 @@ class BossGUI:
 
     def run(self):
         self.result_text.delete("1.0", "end")
-        # ADB预检查
-        ok, msg = _adb_check()
+        # 设备预检查
+        ok, msg = _device_check()
         if not ok:
-            self.log(f"ADB检查失败: {msg}")
+            self.log(f"设备检查失败: {msg}")
             self._set_status(msg)
             return
 
@@ -739,18 +704,19 @@ class BossGUI:
     # ============ 自动投递 ============
     def start_deliver(self):
         self.result_text.delete("1.0", "end")
-        # ADB预检查
-        ok, msg = _adb_check()
+        # 设备预检查
+        ok, msg = _device_check()
         if not ok:
-            self.log(f"ADB检查失败: {msg}")
+            self.log(f"设备检查失败: {msg}")
             self._set_status(msg)
-            messagebox.showwarning("ADB检查失败", msg)
+            messagebox.showwarning("设备检查失败", msg)
             return
 
         min_k, max_k = self._parse_salary_inputs()
         include_words, exclude_words = self._parse_keyword_inputs()
 
         self._stop_event.clear()
+        self._init_log_files()  # 创建本次投递的日志文件
         self._set_running(True)
         t = threading.Thread(target=self._deliver_worker, args=(min_k, max_k, include_words, exclude_words), daemon=True)
         t.start()
@@ -760,8 +726,26 @@ class BossGUI:
         self.log(">>> 正在停止投递...")
         self._set_status("正在停止...")
 
+    def _init_log_files(self):
+        """每次执行投递时创建新的日志文件（时间戳命名）"""
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        # 确保日志目录存在
+        os.makedirs(self.LOG_DIR, exist_ok=True)
+        self._success_log_path = os.path.join(self.LOG_DIR, f"{timestamp}_投递成功日志.txt")
+        self._fail_log_path = os.path.join(self.LOG_DIR, f"{timestamp}_投递失败日志.txt")
+        # 写入表头
+        header = (f"{'公司':<22}│  {'岗位':<22}│  {'城市':<18}│  {'薪资':<14}│  {'结果':<10}")
+        sep = "─" * 95
+        for path in [self._success_log_path, self._fail_log_path]:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(f"{sep}\n{header}\n{sep}\n")
+            except Exception:
+                pass
+
     def _save_deliver_log(self, info, result, reason=""):
-        """异步保存投递日志，不阻塞主线程"""
+        """异步保存投递日志，投递成功和失败分别写入不同文件"""
         now = datetime.datetime.now()
         timestamp = now.strftime("%Y/%m/%d %H:%M:%S")
 
@@ -789,12 +773,18 @@ class BossGUI:
                 f"{_pad(result_tag, 8)}")
         if reason:
             line += f" → {reason}"
-        threading.Thread(target=self._write_log, args=(line,), daemon=True).start()
 
-    def _write_log(self, line):
+        # 根据结果类型选择写入成功或失败日志
+        if result == "投递":
+            log_path = self._success_log_path
+        else:
+            log_path = self._fail_log_path
+        threading.Thread(target=self._write_log, args=(log_path, line), daemon=True).start()
+
+    def _write_log(self, log_path, line):
         """实际写日志文件（在子线程中执行）"""
         try:
-            with open(self.LOG_FILE, "a", encoding="utf-8") as f:
+            with open(log_path, "a", encoding="utf-8") as f:
                 f.write(line.rstrip() + "\n")
         except Exception:
             pass
@@ -804,8 +794,11 @@ class BossGUI:
         if random.randint(1, 5) == 1:
             sw, sh = adb_get_screen_size()
             y = max(100, sh * 2 // 3)
-            x1 = random.randint(min(100, sw - 1), max(100, sw - 100))
-            x2 = random.randint(min(100, sw - 1), max(100, sw - 100))
+            if sw > 200:
+                x1 = random.randint(100, sw - 100)
+                x2 = random.randint(100, sw - 100)
+            else:
+                x1 = x2 = sw // 2
             y2 = max(50, y - 150 + random.randint(-10, 10))
             self.log("[防风控] 随机上滑一次")
             adb_swipe(x1, y, x2, y2, duration=300)
@@ -1000,41 +993,10 @@ class BossGUI:
 
         return None
 
-    def _verify_chat_page(self, max_retry=2):
-        """验证点击'立即沟通'后是否进入了聊天页（内存版，不写中间文件）
-        通过截取屏幕下半区域，OCR识别聊天页特征文字"""
-        for i in range(max_retry):
-            time.sleep(0.5)
-            try:
-                adb_screenshot()
-                img = cv2_imread(SCREENSHOT_PATH)
-                if img is None:
-                    continue
-                h, w = img.shape[:2]
-                # 取底部1/2区域
-                region = img[h // 2:, :]
-                texts = ocr_recognize(region)  # 直接传numpy数组
-                all_text = " ".join([t["text"] for t in texts])
-                # 如果仍在详情页（还能看到沟通按钮），不算进入聊天页
-                if "立即沟通" in all_text or "继续沟通" in all_text:
-                    return False
-                # 聊天页特征关键词
-                chat_keywords = ["发送", "消息", "聊一聊", "输入", "你好", "招呼语"]
-                for kw in chat_keywords:
-                    if kw in all_text:
-                        return True
-                # 没有沟通按钮且没有聊天关键词，可能是弹窗或其他页面，重试
-            except Exception:
-                pass
-        return False
-
     def _press_back(self):
-        """ADB返回键"""
-        try:
-            subprocess.run([ADB_PATH, "shell", "input", "keyevent", "4"],
-                           timeout=ADB_SHORT_TIMEOUT, creationflags=SUBPROC_FLAGS)
-        except Exception:
-            pass
+        """返回键"""
+        if _driver:
+            _driver.press_back()
 
     def _swipe_next(self):
         """向左滑动切换下一个岗位：X=屏幕宽-随机150~100 → X=200+随机0~100，Y=2/3高度±30
