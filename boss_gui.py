@@ -492,8 +492,8 @@ class BossGUI:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 配置自动保存到 boss_config.json，下次启动自动恢复
 - 投递日志按时间戳命名，保存在"投递日志"文件夹下：
-  · XXXXXXXX_HHMMSS_投递成功日志.txt（仅记录投递成功的岗位）
-  · XXXXXXXX_HHMMSS_投递失败日志.txt（记录跳过、重复等未投递的岗位）
+  · XXXX年XX月XX日_HH:MM:SS_投递成功日志.txt（仅记录投递成功的岗位）
+  · XXXX年XX月XX日_HH:MM:SS_投递失败日志.txt（记录跳过、重复等未投递的岗位）
 - 每次执行投递自动创建新日志文件，历史日志保留不覆盖
 - 已投递公司名保存在"已投递公司.json"，用于防重复投递
 """
@@ -937,7 +937,7 @@ class BossGUI:
     def _init_log_files(self):
         """每次执行投递时创建新的日志文件（时间戳命名）"""
         now = datetime.datetime.now()
-        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        timestamp = now.strftime("%Y年%m月%d日_%H:%M:%S")
         # 确保日志目录存在
         os.makedirs(self.LOG_DIR, exist_ok=True)
         self._success_log_path = os.path.join(self.LOG_DIR, f"{timestamp}_投递成功日志.txt")
