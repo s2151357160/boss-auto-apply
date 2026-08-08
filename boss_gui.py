@@ -242,6 +242,8 @@ class BossGUI:
     _DATA_DIR = WORK_DIR
     CONFIG_FILE = os.path.join(_DATA_DIR, "boss_config.json")
     LOG_DIR = os.path.join(_DATA_DIR, "投递日志")  # 日志文件夹
+    APPLIED_FILE = os.path.join(_DATA_DIR, "已投递公司.json")  # 持久化已投递公司名
+    BLACKLIST_FILE = os.path.join(_DATA_DIR, "黑名单公司.json")  # 黑名单公司
 
     def __init__(self, root):
         self.root = root
@@ -251,6 +253,9 @@ class BossGUI:
         self._stop_event = threading.Event()  # 线程安全的停止信号
         self._success_log_path = ""  # 当前投递成功日志路径
         self._fail_log_path = ""     # 当前投递失败日志路径
+        self._json_lock = threading.Lock()  # JSON文件读写锁，防止异步并发覆盖
+        self._blacklist_lock = threading.Lock()  # 黑名单读写锁，防止GUI线程与投递线程并发冲突
+        self._blacklist = self._load_blacklist()  # 加载黑名单到内存
 
         self._build_ui()
         self._load_config()
@@ -263,9 +268,18 @@ class BossGUI:
         frame_settings = ttk.LabelFrame(self.root, text="筛选设置（留空则不执行该条件）")
         frame_settings.pack(fill="x", padx=10, pady=5)
 
-        # ---- 平台选择 ----
-        row0 = ttk.Frame(frame_settings)
-        row0.pack(fill="x", padx=5, pady=3)
+        # ---- 左列：筛选条件 ----
+        left_col = ttk.Frame(frame_settings)
+        left_col.pack(side="left", fill="both", expand=True, padx=(5, 5))
+
+        # ---- 右列：操作参数 + 黑名单 ----
+        right_col = ttk.Frame(frame_settings)
+        right_col.pack(side="left", fill="both", expand=True, padx=(5, 5))
+
+        # === 左列内容 ===
+        # 平台选择
+        row0 = ttk.Frame(left_col)
+        row0.pack(fill="x", pady=3)
         ttk.Label(row0, text="手机平台:").pack(side="left")
         self.platform_var = tk.StringVar(value="android")
         platform_names = [label for _, label in PLATFORM_OPTIONS]
@@ -275,8 +289,8 @@ class BossGUI:
         self.platform_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_platform())
 
         # 薪资
-        row1 = ttk.Frame(frame_settings)
-        row1.pack(fill="x", padx=5, pady=3)
+        row1 = ttk.Frame(left_col)
+        row1.pack(fill="x", pady=3)
         ttk.Label(row1, text="最低薪资(K):").pack(side="left")
         self.min_salary = ttk.Entry(row1, width=8)
         self.min_salary.pack(side="left", padx=5)
@@ -285,42 +299,63 @@ class BossGUI:
         self.max_salary.pack(side="left", padx=5)
 
         # 关键词
-        row2 = ttk.Frame(frame_settings)
-        row2.pack(fill="x", padx=5, pady=3)
+        row2 = ttk.Frame(left_col)
+        row2.pack(fill="x", pady=3)
         ttk.Label(row2, text="包含关键词:").pack(side="left")
         self.include_kw = ttk.Entry(row2, width=20)
         self.include_kw.pack(side="left", padx=5)
         ttk.Label(row2, text="(逗号分隔)").pack(side="left")
 
-        row3 = ttk.Frame(frame_settings)
-        row3.pack(fill="x", padx=5, pady=3)
+        row3 = ttk.Frame(left_col)
+        row3.pack(fill="x", pady=3)
         ttk.Label(row3, text="排除关键词:").pack(side="left")
         self.exclude_kw = ttk.Entry(row3, width=20)
         self.exclude_kw.pack(side="left", padx=5)
         ttk.Label(row3, text="(逗号分隔)").pack(side="left")
 
-        # 延迟设置
-        row4 = ttk.Frame(frame_settings)
-        row4.pack(fill="x", padx=5, pady=3)
+        # 防重复投递
+        row_dedup = ttk.Frame(left_col)
+        row_dedup.pack(fill="x", pady=3)
+        self.dedup_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row_dedup, text="防重复投递（跳过已投递过的公司，重启后仍有效）", variable=self.dedup_var).pack(side="left")
+
+        # === 右列内容 ===
+        # 操作延迟
+        row4 = ttk.Frame(right_col)
+        row4.pack(fill="x", pady=3)
         ttk.Label(row4, text="操作延迟(毫秒):").pack(side="left")
         self.delay_entry = ttk.Entry(row4, width=8)
         self.delay_entry.insert(0, "3000")
         self.delay_entry.pack(side="left", padx=5)
 
-        row5 = ttk.Frame(frame_settings)
-        row5.pack(fill="x", padx=5, pady=3)
+        # 随机延迟
+        row5 = ttk.Frame(right_col)
+        row5.pack(fill="x", pady=3)
         ttk.Label(row5, text="随机延迟(毫秒):").pack(side="left")
         self.random_delay_entry = ttk.Entry(row5, width=8)
         self.random_delay_entry.insert(0, "50")
         self.random_delay_entry.pack(side="left", padx=5)
-        ttk.Label(row5, text="(实际延迟 = 操作延迟 ± 随机延迟)").pack(side="left", padx=5)
+        ttk.Label(row5, text="(操作延迟 ± 随机延迟)").pack(side="left", padx=5)
 
-        row6 = ttk.Frame(frame_settings)
-        row6.pack(fill="x", padx=5, pady=3)
+        # 投递次数
+        row6 = ttk.Frame(right_col)
+        row6.pack(fill="x", pady=3)
         ttk.Label(row6, text="投递次数:").pack(side="left")
         self.deliver_count_entry = ttk.Entry(row6, width=8)
         self.deliver_count_entry.insert(0, "10")
         self.deliver_count_entry.pack(side="left", padx=5)
+
+        # 黑名单
+        row_black = ttk.Frame(right_col)
+        row_black.pack(fill="x", pady=3)
+        ttk.Label(row_black, text="黑名单公司:").pack(side="left")
+        self.blacklist_entry = ttk.Entry(row_black, width=14)
+        self.blacklist_entry.pack(side="left", padx=5)
+        ttk.Button(row_black, text="添加", command=self._add_blacklist).pack(side="left", padx=2)
+        ttk.Button(row_black, text="查看", command=self._view_blacklist).pack(side="left", padx=2)
+        ttk.Button(row_black, text="清空", command=self._clear_blacklist).pack(side="left", padx=2)
+        self.blacklist_count_var = tk.StringVar(value="")
+        ttk.Label(row_black, textvariable=self.blacklist_count_var).pack(side="left", padx=5)
 
         # ---- 按钮 ----
         frame_btn = ttk.Frame(self.root)
@@ -413,6 +448,10 @@ class BossGUI:
 [投递次数]  目标投递成功数量（跳过的不算）。
             达到该数量后自动停止。
 
+[防重复投递]  勾选后，同一公司只投递一次，重启程序后仍有效。
+              已投递公司名保存在"已投递公司.json"中，可手动编辑删除。
+              不勾选时，仅在本次运行期间去重（重启后记录丢失）。
+
 三、功能按钮
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [截图并识别]  对手机当前屏幕截图并OCR识别，显示岗位信息、
@@ -433,20 +472,30 @@ class BossGUI:
 - 每投递10家随机休息 5~10 秒
 - 延迟自带随机波动
 
-五、自动停止条件
+五、异常自动恢复
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- 截图失败：自动重试3次，仍失败则跳过当前岗位继续下一个
+- OCR识别异常：自动重试2次，仍失败则跳过当前岗位
+- 点击/滑动失败：自动重试2次，仍失败则跳过当前岗位
+- 返回键异常：自动重试1次，仍失败则继续投递
+- 识别流程整体异常：跳过当前岗位继续下一个
+- 所有异常均记录日志，不会导致投递中断
+
+六、自动停止条件
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 达到投递次数目标
 - 连续3次识别到同一岗位（列表到底）
 - 检测到弹窗关键词（投递上限/操作频繁/账号异常等）
 - 手动点击"停止投递"
 
-六、数据存储
+七、数据存储
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 配置自动保存到 boss_config.json，下次启动自动恢复
 - 投递日志按时间戳命名，保存在"投递日志"文件夹下：
   · XXXXXXXX_HHMMSS_投递成功日志.txt（仅记录投递成功的岗位）
   · XXXXXXXX_HHMMSS_投递失败日志.txt（记录跳过、重复等未投递的岗位）
 - 每次执行投递自动创建新日志文件，历史日志保留不覆盖
+- 已投递公司名保存在"已投递公司.json"，用于防重复投递
 """
 
         help_text.insert("1.0", content)
@@ -455,6 +504,105 @@ class BossGUI:
         ttk.Button(help_win, text="关闭", command=help_win.destroy).pack(pady=8)
 
     # ============ 配置持久化 ============
+    def _load_applied_companies(self):
+        """从JSON文件加载已投递公司列表"""
+        if not os.path.isfile(self.APPLIED_FILE):
+            return set()
+        try:
+            with open(self.APPLIED_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return set(data) if isinstance(data, list) else set()
+        except Exception:
+            return set()
+
+    def _save_applied_company(self, company):
+        """异步追加保存一个已投递公司名到JSON文件"""
+        if not company:
+            return
+        threading.Thread(target=self._write_applied_company, args=(company,), daemon=True).start()
+
+    def _write_applied_company(self, company):
+        """实际写已投递公司JSON（在子线程中执行，加锁防并发）"""
+        with self._json_lock:
+            try:
+                if os.path.isfile(self.APPLIED_FILE):
+                    with open(self.APPLIED_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if not isinstance(data, list):
+                        data = []
+                else:
+                    data = []
+                if company not in data:
+                    data.append(company)
+                    with open(self.APPLIED_FILE, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+    def _load_blacklist(self):
+        """从JSON文件加载黑名单公司列表到内存"""
+        if not os.path.isfile(self.BLACKLIST_FILE):
+            return set()
+        try:
+            with open(self.BLACKLIST_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return set(data) if isinstance(data, list) else set()
+        except Exception:
+            return set()
+
+    def _save_blacklist(self):
+        """异步保存黑名单到JSON文件"""
+        data = list(self._blacklist)
+        threading.Thread(target=self._write_blacklist, args=(data,), daemon=True).start()
+
+    def _write_blacklist(self, data):
+        """实际写黑名单JSON（在子线程中执行，加锁）"""
+        with self._json_lock:
+            try:
+                with open(self.BLACKLIST_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+    def _add_blacklist(self):
+        """从输入框添加公司到黑名单"""
+        name = self.blacklist_entry.get().strip()
+        if not name:
+            return
+        with self._blacklist_lock:
+            self._blacklist.add(name)
+        self._save_blacklist()
+        self.blacklist_entry.delete(0, "end")
+        self._update_blacklist_count()
+        self.log(f"[黑名单] 已添加: {name}")
+
+    def _view_blacklist(self):
+        """查看当前黑名单"""
+        with self._blacklist_lock:
+            bl_copy = sorted(self._blacklist)
+        if not bl_copy:
+            messagebox.showinfo("黑名单", "黑名单为空")
+            return
+        messagebox.showinfo("黑名单", f"共 {len(bl_copy)} 家公司:\n\n" + "\n".join(bl_copy))
+
+    def _clear_blacklist(self):
+        """清空黑名单"""
+        with self._blacklist_lock:
+            count = len(self._blacklist)
+        if not count:
+            return
+        if messagebox.askyesno("清空黑名单", f"确定清空黑名单（共 {count} 家公司）？"):
+            with self._blacklist_lock:
+                self._blacklist.clear()
+            self._save_blacklist()
+            self._update_blacklist_count()
+            self.log("[黑名单] 已清空")
+
+    def _update_blacklist_count(self):
+        """更新黑名单数量显示"""
+        count = len(self._blacklist)
+        self.blacklist_count_var.set(f"({count}家)" if count else "")
+
     def _on_close(self):
         self._save_config()
         self.root.destroy()
@@ -477,6 +625,7 @@ class BossGUI:
             "random_delay": self.random_delay_entry.get(),
             "deliver_count": self.deliver_count_entry.get(),
             "platform": self.platform_var.get(),
+            "dedup": self.dedup_var.get(),
         }
         try:
             with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -507,6 +656,9 @@ class BossGUI:
             # 恢复平台选择
             if "platform" in cfg:
                 self.platform_var.set(str(cfg["platform"]))
+            # 恢复防重复投递开关
+            if "dedup" in cfg:
+                self.dedup_var.set(bool(cfg["dedup"]))
         except Exception:
             pass
 
@@ -581,30 +733,86 @@ class BossGUI:
         finally:
             self._set_running(False)
 
+    def _safe_screenshot(self, max_retry=2):
+        """安全截图，失败自动重试，返回 (ok, error_msg)
+        注意：adb_screenshot内部已有3次重试，这里只额外重试2轮即可"""
+        for i in range(max_retry):
+            try:
+                adb_screenshot()
+                return True, ""
+            except Exception as e:
+                if i < max_retry - 1:
+                    self.log(f"[异常恢复] 截图失败({i+1}/{max_retry}): {e}，重试中...")
+                    time.sleep(2)
+                else:
+                    return False, f"截图失败({max_retry}次重试均失败): {e}"
+        return False, "截图失败"
+
+    def _safe_ocr(self, image_input, max_retry=2):
+        """安全OCR识别，失败自动重试，返回 texts列表（空列表表示失败）"""
+        for i in range(max_retry):
+            try:
+                texts = ocr_recognize(image_input)
+                return texts
+            except Exception as e:
+                if i < max_retry - 1:
+                    self.log(f"[异常恢复] OCR识别异常({i+1}/{max_retry}): {e}，重试中...")
+                    time.sleep(1)
+                else:
+                    self.log(f"[异常恢复] OCR识别异常，跳过本次: {e}")
+                    return []
+        return []
+
+    def _safe_tap(self, x, y, offset=10, max_retry=2):
+        """安全点击，失败自动重试，返回 (ok, error_msg)"""
+        for i in range(max_retry):
+            try:
+                adb_tap(x, y, offset)
+                return True, ""
+            except Exception as e:
+                if i < max_retry - 1:
+                    self.log(f"[异常恢复] 点击失败({i+1}/{max_retry}): {e}，重试中...")
+                    time.sleep(1)
+                else:
+                    return False, f"点击失败: {e}"
+        return False, "点击失败"
+
+    def _safe_swipe(self, x1, y1, x2, y2, duration=500, max_retry=2):
+        """安全滑动，失败自动重试，返回 (ok, error_msg)"""
+        for i in range(max_retry):
+            try:
+                adb_swipe(x1, y1, x2, y2, duration)
+                return True, ""
+            except Exception as e:
+                if i < max_retry - 1:
+                    self.log(f"[异常恢复] 滑动失败({i+1}/{max_retry}): {e}，重试中...")
+                    time.sleep(1)
+                else:
+                    return False, f"滑动失败: {e}"
+        return False, "滑动失败"
+
     def _do_recognize(self, min_k, max_k, include_words, exclude_words):
         """识别流程，返回 (info dict, 跳过原因)，不符合返回 (None, 原因)"""
-        # 1. 截图
+        # 1. 截图（异常自动恢复）
         self._set_status("正在截图...")
         self.log("正在截图...")
-        try:
-            adb_screenshot()
-        except Exception as e:
-            self.log(f"截图失败: {e}")
-            return {"company": "", "job": "", "city": "", "salary": ""}, f"截图失败: {e}"
+        ok, err = self._safe_screenshot()
+        if not ok:
+            return {"company": "", "job": "", "city": "", "salary": ""}, err
 
         # 2. 裁剪上半部分
         self._set_status("正在裁剪...")
         self.log("正在裁剪上半部分...")
         try:
             top_half = crop_top_half(SCREENSHOT_PATH)
-        except FileNotFoundError as e:
-            self.log(f"截图文件读取失败: {e}")
-            return {"company": "", "job": "", "city": "", "salary": ""}, f"截图文件读取失败: {e}"
+        except Exception as e:
+            self.log(f"[异常恢复] 裁剪失败: {e}")
+            return {"company": "", "job": "", "city": "", "salary": ""}, f"裁剪失败: {e}"
 
-        # 3. 全文OCR
+        # 3. 全文OCR（异常自动恢复）
         self._set_status("正在OCR识别...")
         self.log("正在OCR识别全部文字...")
-        all_texts = ocr_recognize(top_half)  # 直接传numpy数组
+        all_texts = self._safe_ocr(top_half)
         all_text_str = " ".join([t["text"] for t in all_texts])
         self.log(f"识别到 {len(all_texts)} 条文字:")
         for t in all_texts:
@@ -621,10 +829,10 @@ class BossGUI:
         self._set_status("提取关键信息...")
         self.log("\n--- 提取关键信息 ---")
         try:
-            salary_img_array = filter_green_color_img(top_half)  # 内存版，直接传裁剪后的数组
-            salary_texts = ocr_recognize(salary_img_array)
-        except FileNotFoundError as e:
-            self.log(f"裁剪文件读取失败: {e}")
+            salary_img_array = filter_green_color_img(top_half)
+            salary_texts = self._safe_ocr(salary_img_array)
+        except Exception as e:
+            self.log(f"[异常恢复] 薪资识别异常: {e}")
             salary_texts = []
         info = extract_info(all_texts, salary_texts)
         self.log(f"  岗位: {info['job']}")
@@ -801,7 +1009,7 @@ class BossGUI:
                 x1 = x2 = sw // 2
             y2 = max(50, y - 150 + random.randint(-10, 10))
             self.log("[防风控] 随机上滑一次")
-            adb_swipe(x1, y, x2, y2, duration=300)
+            self._safe_swipe(x1, y, x2, y2, duration=500)
 
     def _deliver_worker(self, min_k, max_k, include_words, exclude_words):
         """自动投递子线程"""
@@ -812,7 +1020,18 @@ class BossGUI:
             scan_count = 0     # 扫描计数
             max_count = self._safe_int(self.deliver_count_entry, 15)
             start_time = time.time()
-            delivered_companies = set()  # 已投递公司名去重
+            delivered_companies = set()  # 本次会话已投递公司名去重
+            # 如果开启了防重复投递，加载历史已投递公司
+            if self.dedup_var.get():
+                loaded = self._load_applied_companies()
+                delivered_companies.update(loaded)
+                if loaded:
+                    self.log(f"[防重复投递] 已加载 {len(loaded)} 家历史已投递公司")
+            # 加载黑名单（复制时加锁防并发）
+            with self._blacklist_lock:
+                blacklist = set(self._blacklist)
+            if blacklist:
+                self.log(f"[黑名单] 已加载 {len(blacklist)} 家黑名单公司")
             last_job_key = ""            # 上一次岗位标识（公司+岗位），用于检测横滑到底
             same_page_count = 0         # 连续相同岗位计数
             MAX_SAME_PAGE = 3           # 连续N次相同认为已到列表底部
@@ -833,7 +1052,15 @@ class BossGUI:
 
                 # 1. 识别筛选
                 _update_status(f"扫描第{scan_count}个 - 识别中...")
-                info, skip_reason = self._do_recognize(min_k, max_k, include_words, exclude_words)
+                try:
+                    info, skip_reason = self._do_recognize(min_k, max_k, include_words, exclude_words)
+                except Exception as e:
+                    # 识别整体异常时，跳过本次继续下一个
+                    self.log(f"[异常恢复] 识别流程异常: {e}，跳过本次")
+                    skip_count += 1
+                    self._swipe_next()
+                    _update_status(f"识别异常，跳过")
+                    continue
                 self._random_up_swipe()  # 识别完成后1/5概率随机上滑防风控
 
                 # ---- 横滑到底检测 ----
@@ -849,6 +1076,14 @@ class BossGUI:
 
                 # ---- 已投递去重 ----
                 company = info.get("company", "")
+                # 黑名单检查（始终生效）
+                if company and company in blacklist:
+                    skip_count += 1
+                    self.log(f">>> 公司 [{company}] 在黑名单中，跳过")
+                    self._save_deliver_log(info, "跳过", f"黑名单: {company}")
+                    self._swipe_next()
+                    _update_status(f"黑名单: {company[:15]}")
+                    continue
                 if company and company in delivered_companies:
                     dup_count += 1
                     self.log(f">>> 公司 [{company}] 已投递过，跳过重复")
@@ -865,16 +1100,15 @@ class BossGUI:
                     _update_status("跳过: " + skip_reason[:20])
                     continue
 
-                # 2. 检测底部按钮（下方1/4区域）
+                # 4. 检测底部按钮（下方1/4区域）
                 _update_status(f"扫描第{scan_count}个 - 检测沟通按钮...")
-                self.log("\n--- 步骤2: 检测沟通按钮 ---")
-                # 重新截图，确保获取当前屏幕状态
-                try:
-                    adb_screenshot()
-                except Exception as e:
-                    self.log(f"按钮检测截图失败: {e}")
+                self.log("\n--- 步骤4: 检测沟通按钮 ---")
+                # 重新截图，确保获取当前屏幕状态（异常自动恢复）
+                ok, err = self._safe_screenshot()
+                if not ok:
+                    self.log(f"[异常恢复] {err}，跳过本次")
                     skip_count += 1
-                    self._save_deliver_log(info, "跳过", f"截图失败: {e}")
+                    self._save_deliver_log(info, "跳过", err)
                     self._swipe_next()
                     _update_status("截图失败")
                     continue
@@ -884,6 +1118,11 @@ class BossGUI:
                 if continue_pos is not None:
                     self.log("检测到\"继续沟通\"，已沟通过，跳过")
                     dup_count += 1
+                    # 加入去重集，避免同一会话反复遇到
+                    if company:
+                        delivered_companies.add(company)
+                        # 始终持久化保存
+                        self._save_applied_company(company)
                     self._save_deliver_log(info, "重复", "已沟通过")
                     self._swipe_next()
                     _update_status("已沟通过")
@@ -899,24 +1138,79 @@ class BossGUI:
                     _update_status("未找到立即沟通")
                     continue
                 self.log(f"找到\"立即沟通\"坐标: ({btn_pos[0]}, {btn_pos[1]})")
-                adb_tap(btn_pos[0], btn_pos[1])
+                # 点击（异常自动恢复）
+                tap_ok, tap_err = self._safe_tap(btn_pos[0], btn_pos[1])
+                if not tap_ok:
+                    self.log(f"[异常恢复] {tap_err}，跳过本次")
+                    skip_count += 1
+                    self._save_deliver_log(info, "跳过", tap_err)
+                    self._swipe_next()
+                    _update_status("点击失败")
+                    continue
                 self._short_delay(1.0)  # 等页面跳转
 
-                # 3. 返回
+                # 3. 点击后验证：重新截图检测是否仍在原页面（立即沟通还在=点击无效）
+                _update_status(f"扫描第{scan_count}个 - 验证点击结果...")
+                self.log("\n--- 步骤3: 验证点击是否生效 ---")
+                verify_ok, _ = self._safe_screenshot()
+                click_effective = True
+                if verify_ok:
+                    # 检测"继续沟通"（如果出现说明已沟通过，计为重复）
+                    after_continue = self._find_button_in_screen("继续沟通", 0.75, 1.0)
+                    if after_continue is not None:
+                        self.log("点击后检测到\"继续沟通\"，该岗位已沟通过")
+                        dup_count += 1
+                        if company:
+                            delivered_companies.add(company)
+                            self._save_applied_company(company)
+                        self._save_deliver_log(info, "重复", "已沟通过")
+                        # 返回原页面
+                        try:
+                            self._press_back()
+                        except Exception:
+                            pass
+                        self._short_delay(0.5)
+                        self._swipe_next()
+                        _update_status("已沟通过")
+                        continue
+                    # 再次检测"立即沟通"，如果还在说明点击没生效
+                    after_btn = self._find_button_in_screen("立即沟通", 0.75, 1.0)
+                    if after_btn is not None:
+                        self.log("点击后仍检测到\"立即沟通\"，点击可能未生效")
+                        click_effective = False
+
+                if not click_effective:
+                    skip_count += 1
+                    self._save_deliver_log(info, "跳过", "点击立即沟通无效")
+                    self._swipe_next()
+                    _update_status("点击无效")
+                    continue
+
+                # 4. 返回
                 _update_status(f"扫描第{scan_count}个 - 返回...")
-                self.log("\n--- 步骤3: 返回 ---")
-                self._press_back()
+                self.log("\n--- 步骤4: 返回 ---")
+                try:
+                    self._press_back()
+                except Exception as e:
+                    self.log(f"[异常恢复] 返回键异常: {e}，重试一次...")
+                    try:
+                        time.sleep(1)
+                        self._press_back()
+                    except Exception:
+                        self.log("[异常恢复] 返回键重试仍失败，继续投递")
                 self._short_delay(0.5)  # 返回动画很短
 
-                # 4. 横滑切换下一个岗位
+                # 5. 横滑切换下一个岗位（异常自动恢复）
                 _update_status(f"扫描第{scan_count}个 - 滑动下一个...")
-                self.log("\n--- 步骤4: 滑动切换下一个岗位 ---")
+                self.log("\n--- 步骤5: 滑动切换下一个岗位 ---")
                 self._swipe_next()
                 self._wait_page_stable()
 
                 deliver_count += 1
                 if company:
                     delivered_companies.add(company)
+                    # 始终持久化保存，无论是否开启防重复投递
+                    self._save_applied_company(company)
                 self.log(f">>> 已投递 {deliver_count} 个岗位!")
                 self._save_deliver_log(info, "投递")
                 _update_status()
@@ -966,6 +1260,7 @@ class BossGUI:
         优先: HSV绿色过滤+OCR识别 -> 备用: 直接OCR识别底部区域"""
         img = cv2_imread(SCREENSHOT_PATH)
         if img is None:
+            self.log(f"[警告] 截图文件读取失败，无法查找按钮: {keyword}")
             return None
         h, w = img.shape[:2]
         # 裁剪区域
@@ -974,7 +1269,7 @@ class BossGUI:
 
         # 方式1: HSV绿色过滤 + OCR
         green_img = filter_green_color_img(region)
-        texts = ocr_recognize(green_img)
+        texts = self._safe_ocr(green_img)
         for t in texts:
             if keyword in t["text"]:
                 box = t["box"]
@@ -983,7 +1278,7 @@ class BossGUI:
                 return (cx, cy)
 
         # 方式2: 直接对原图OCR（不依赖HSV颜色过滤）
-        texts = ocr_recognize(region)
+        texts = self._safe_ocr(region)
         for t in texts:
             if keyword in t["text"]:
                 box = t["box"]
@@ -1006,7 +1301,7 @@ class BossGUI:
         y = max(100, sh * 2 // 3 + random.randint(-30, 30))
         x1 = max(100, sw - random.randint(100, 150))           # 起点：屏幕右侧
         x2 = 200 + random.randint(0, 100)                        # 终点：200~300，避开边缘手势
-        adb_swipe(x1, y, x2, y, duration=300)
+        self._safe_swipe(x1, y, x2, y, duration=500)
         time.sleep(2)  # 滑动结束等待2秒再截图
 
     def _wait_page_stable(self, max_wait=2.0, interval=0.5):
@@ -1017,7 +1312,11 @@ class BossGUI:
         prev_mean = None
         while elapsed < max_wait:
             try:
-                adb_screenshot()
+                ok, _ = self._safe_screenshot()
+                if not ok:
+                    time.sleep(interval)
+                    elapsed += interval
+                    continue
                 img = cv2_imread(SCREENSHOT_PATH)
                 if img is None:
                     time.sleep(interval)

@@ -4,6 +4,7 @@
 # 本文件仅保留裁剪和OCR功能，供独立测试使用
 
 import os
+import numpy as np
 import cv2
 from rapidocr_onnxruntime import RapidOCR
 
@@ -12,13 +13,29 @@ SCREENSHOT_PATH = os.path.join(os.environ.get("TEMP", os.path.dirname(os.path.ab
 CROP_PATH = os.path.join(os.environ.get("TEMP", os.path.dirname(os.path.abspath(__file__))), "screenshot_top.png")
 
 
+def cv2_imread(path):
+    """cv2.imread 不支持中文/空格路径，用 numpy.fromfile + cv2.imdecode 替代"""
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        return None
+
+
 def crop_top_half(image_path, save_path=None):
     """裁剪图片上半部分"""
-    img = cv2.imread(image_path)
+    img = cv2_imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"截图文件读取失败: {image_path}")
     h, w = img.shape[:2]
     top_half = img[:h//2, :]
     if save_path:
-        cv2.imwrite(save_path, top_half)
+        # 用 imencode + tofile 写入，兼容中文路径
+        ext = os.path.splitext(save_path)[1] or '.png'
+        result, buf = cv2.imencode(ext, top_half)
+        if result:
+            buf.tofile(save_path)
     return top_half
 
 

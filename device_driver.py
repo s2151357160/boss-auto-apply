@@ -74,9 +74,30 @@ class ADBDriver(DeviceDriver):
         return subprocess.run(cmd, **kwargs)
 
     def check_connection(self):
-        """检查ADB是否可用，返回 (ok, msg)"""
+        """检查ADB是否可用，返回 (ok, msg)
+        首次检测不到设备时，自动重启ADB服务再重试一次"""
         if not os.path.isfile(self.adb_path):
             return False, f"ADB未找到: {self.adb_path}"
+        
+        # 尝试检测设备
+        ok, msg = self._check_devices()
+        if ok:
+            return ok, msg
+        
+        # 首次没找到，重启ADB服务后重试
+        self.kill_server()
+        time.sleep(1)
+        self.start_server()
+        time.sleep(2)
+        ok, msg = self._check_devices()
+        if ok:
+            return ok, msg
+        
+        # 仍然没有，提示用户
+        return False, "未检测到手机连接，请检查USB线和USB调试（可尝试重新插拔USB）"
+
+    def _check_devices(self):
+        """内部检测设备列表"""
         try:
             r = self._run(["devices"], capture=True)
             devices = []
@@ -85,10 +106,10 @@ class ADBDriver(DeviceDriver):
                 if line and "device" in line and "unauthorized" not in line and "daemon" not in line:
                     devices.append(line.split("\t")[0])
             if not devices:
-                return False, "未检测到手机连接，请检查USB线和USB调试"
+                return False, "无设备"
             return True, f"已连接: {devices[0]}"
         except subprocess.TimeoutExpired:
-            return False, "ADB命令超时，请重启ADB或重新插拔USB"
+            return False, "ADB命令超时"
         except Exception as e:
             return False, f"ADB检查失败: {e}"
 
@@ -124,19 +145,29 @@ class ADBDriver(DeviceDriver):
         ry = max(0, y + random.randint(-offset, offset))
         self._run(["shell", "input", "tap", str(rx), str(ry)])
 
-    def swipe(self, x1, y1, x2, y2, duration=300):
-        """滑动操作"""
+    def swipe(self, x1, y1, x2, y2, duration=500):
+        """滑动操作，duration最低500ms兼容更多ROM"""
+        duration = max(duration, 500)
         self._run(["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)])
 
     def get_screen_size(self):
-        """获取屏幕分辨率（缓存结果）"""
+        """获取屏幕分辨率（缓存结果）
+        优先使用Override size（用户实际使用的分辨率），
+        因为 input swipe/tap 命令使用的是Override坐标系而非物理分辨率"""
         if self._screen_size is not None:
             return self._screen_size
         try:
             result = self._run(["shell", "wm", "size"], capture=True)
-            match = re.search(r'(\d+)x(\d+)', result.stdout)
-            if match:
-                self._screen_size = (int(match.group(1)), int(match.group(2)))
+            text = result.stdout
+            # 优先取 Override size（如 1080x2400），这才是 input 命令的坐标系
+            override_match = re.search(r'Override\s+size:\s*(\d+)x(\d+)', text)
+            if override_match:
+                self._screen_size = (int(override_match.group(1)), int(override_match.group(2)))
+            else:
+                # 没有 Override，取 Physical size
+                phys_match = re.search(r'Physical\s+size:\s*(\d+)x(\d+)', text)
+                if phys_match:
+                    self._screen_size = (int(phys_match.group(1)), int(phys_match.group(2)))
         except Exception:
             pass
         if self._screen_size is None:
@@ -187,23 +218,41 @@ class HDCDriver(DeviceDriver):
         return subprocess.run(cmd, **kwargs)
 
     def check_connection(self):
-        """检查HDC是否可用，返回 (ok, msg)"""
+        """检查HDC是否可用，返回 (ok, msg)
+        首次检测不到设备时，自动重启HDC服务再重试一次"""
         if not os.path.isfile(self.hdc_path):
             return False, f"HDC未找到: {self.hdc_path}"
+        
+        ok, msg = self._check_targets()
+        if ok:
+            return ok, msg
+        
+        # 重启HDC服务后重试
+        self.kill_server()
+        time.sleep(1)
+        self.start_server()
+        time.sleep(2)
+        ok, msg = self._check_targets()
+        if ok:
+            return ok, msg
+        
+        return False, "未检测到鸿蒙设备连接，请检查USB线和开发者模式（可尝试重新插拔USB）"
+
+    def _check_targets(self):
+        """内部检测设备列表"""
         try:
             r = self._run(["list", "targets"], capture=True)
             lines = r.stdout.strip().split("\n")
             devices = []
             for line in lines:
                 line = line.strip()
-                # 过滤空行和 "[Empty]" 提示
                 if line and line != "[Empty]" and not line.startswith("["):
                     devices.append(line)
             if not devices:
-                return False, "未检测到鸿蒙设备连接，请检查USB线和开发者模式"
+                return False, "无设备"
             return True, f"已连接: {devices[0]}"
         except subprocess.TimeoutExpired:
-            return False, "HDC命令超时，请检查HDC和USB连接"
+            return False, "HDC命令超时"
         except Exception as e:
             return False, f"HDC检查失败: {e}"
 
@@ -250,24 +299,35 @@ class HDCDriver(DeviceDriver):
         ry = max(0, y + random.randint(-offset, offset))
         self._run(["shell", "uitest", "uiInput", "click", str(rx), str(ry)])
 
-    def swipe(self, x1, y1, x2, y2, duration=300):
+    def swipe(self, x1, y1, x2, y2, duration=500):
         """滑动操作
         鸿蒙滑动命令：hdc shell uitest uiInput swipe x1 y1 x2 y2 [velocity]
-        velocity范围200-40000，默认600"""
-        # duration(ms) -> velocity: 大约 600 = 300ms, 越快velocity越大
-        velocity = max(200, min(40000, int(600 * 300 / max(duration, 50))))
+        velocity范围200-40000，根据duration换算：velocity = 距离/duration*1000
+        但duration太短(<200ms)或太长(>2s)时使用固定值1500"""
+        if duration and 200 <= duration <= 2000:
+            distance = max(abs(x2 - x1), abs(y2 - y1), 1)
+            velocity = int(min(max(distance / duration * 1000, 200), 40000))
+        else:
+            velocity = 1500
         self._run(["shell", "uitest", "uiInput", "swipe", str(x1), str(y1), str(x2), str(y2), str(velocity)])
 
     def get_screen_size(self):
         """获取屏幕分辨率（缓存结果）
-        鸿蒙命令：hdc shell wm size"""
+        优先使用Override size（用户实际使用的分辨率），
+        因为 input/uitest 命令使用的是Override坐标系而非物理分辨率"""
         if self._screen_size is not None:
             return self._screen_size
         try:
             result = self._run(["shell", "wm", "size"], capture=True)
-            match = re.search(r'(\d+)x(\d+)', result.stdout)
-            if match:
-                self._screen_size = (int(match.group(1)), int(match.group(2)))
+            text = result.stdout
+            # 优先取 Override size
+            override_match = re.search(r'Override\s+size:\s*(\d+)x(\d+)', text)
+            if override_match:
+                self._screen_size = (int(override_match.group(1)), int(override_match.group(2)))
+            else:
+                phys_match = re.search(r'Physical\s+size:\s*(\d+)x(\d+)', text)
+                if phys_match:
+                    self._screen_size = (int(phys_match.group(1)), int(phys_match.group(2)))
         except Exception:
             pass
         if self._screen_size is None:
