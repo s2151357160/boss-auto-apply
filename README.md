@@ -55,9 +55,7 @@
    python boss_gui.py
    ```
 
-### exe 运行
 
-直接双击 exe 即可，内含 ADB、HDC、OCR 模型，无需额外安装。
 
 ### 鸿蒙手机
 
