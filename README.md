@@ -1,15 +1,4 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '4afa4944-9f8a-4d7f-83bc-8e05af34b12f'
-  PropagateID: '4afa4944-9f8a-4d7f-83bc-8e05af34b12f'
-  ReservedCode1: '2cad791f-abb4-4dc8-b709-e3670faebcd4'
-  ReservedCode2: '2cad791f-abb4-4dc8-b709-e3670faebcd4'
----
-
-# BOSS直聘自动投递工具
+﻿# BOSS直聘自动投递工具
 
 基于 ADB/HDC + OCR 的 BOSS直聘自动投递效率工具，支持安卓和鸿蒙手机，自动识别岗位信息并批量投递。
 
@@ -87,5 +76,3 @@ AIGC:
 - 连续3次识别到同一岗位（列表到底）
 - 检测到弹窗关键词（投递上限/操作频繁/账号异常等）
 - 手动点击"停止投递"（即时响应）
-
-> AI生成
