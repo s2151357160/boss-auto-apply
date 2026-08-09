@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'fc701113-cfc4-4d5e-b115-25f58cc12249'
-  PropagateID: 'fc701113-cfc4-4d5e-b115-25f58cc12249'
-  ReservedCode1: 'fc1e239a-50a6-44bc-bcf9-bb33cc71ac21'
-  ReservedCode2: 'fc1e239a-50a6-44bc-bcf9-bb33cc71ac21'
+  ProduceID: '4afa4944-9f8a-4d7f-83bc-8e05af34b12f'
+  PropagateID: '4afa4944-9f8a-4d7f-83bc-8e05af34b12f'
+  ReservedCode1: '2cad791f-abb4-4dc8-b709-e3670faebcd4'
+  ReservedCode2: '2cad791f-abb4-4dc8-b709-e3670faebcd4'
 ---
 
 # BOSS直聘自动投递工具
@@ -39,8 +39,6 @@ AIGC:
 - **GUI**：tkinter（原生 Python GUI）
 - **OCR**：RapidOCR（基于 ONNX Runtime）
 - **设备驱动**：ADB（安卓） + HDC（鸿蒙），统一抽象层
-- **打包**：PyInstaller 单文件 exe，集成 ADB/HDC/OCR 全部依赖
-- **源码加密**：zlib 压缩 + base64 编码，防止逆向
 
 ## 文件说明
 
@@ -75,22 +73,6 @@ AIGC:
 ### 鸿蒙手机
 
 纯血鸿蒙 NEXT 不支持 ADB，需选择"鸿蒙(HDC)"平台，手机开启开发者模式。
-
-## 打包说明
-
-使用 PyInstaller 打包为单文件 exe，支持源码深度加密：
-
-```bash
-# 1. 运行加密脚本生成加密入口
-python .temp/encrypt.py
-
-# 2. 修改 boss.spec：入口改为 boss_gui_enc.py，补充 hiddenimports
-
-# 3. 打包
-PyInstaller boss.spec --noconfirm
-
-# 4. 打包后回退源码和 spec 为普通版
-```
 
 ## 注意事项
 
