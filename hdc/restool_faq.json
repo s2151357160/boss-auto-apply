@@ -1,0 +1,32 @@
+{
+    "default": {
+        "cn": "https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/restool",
+        "en": "https://developer.huawei.com/consumer/en/doc/harmonyos-guides/restool"
+    },
+    "faqs": [
+        {
+            "code": 11201001,
+            "cn": "https://developer.huawei.com/consumer/cn/doc/harmonyos-faqs/faqs-compiling-and-building-181",
+            "en": "https://developer.huawei.com/consumer/en/doc/harmonyos-faqs/faqs-compiling-and-building-181"
+        },
+        {
+            "code": 11211120,
+            "extSolutions": [
+                {
+                    "fileName": "module.json",
+                    "solution": "Check whether the hvigorfile.ts in the project root directory or the module.json5 file in the module directory references undefined resources."
+                }
+            ]
+        },
+        {
+            "code": 11210016,
+            "cn": "https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/ide-hvigor-build-profile#section754823013348, https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/restool",
+            "en": "https://developer.huawei.com/consumer/en/doc/harmonyos-guides/ide-hvigor-build-profile#section754823013348, https://developer.huawei.com/consumer/en/doc/harmonyos-guides/restool",
+            "extSolutions": [
+                {
+                    "solution": "Check whether the buildOption->resOptions->qualifiersConfig configuration in the module-level build-profile.json5 file is correct."
+                }
+            ]
+         }
+    ]
+}
