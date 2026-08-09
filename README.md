@@ -3,76 +3,107 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '358dc0d2-9429-4ce5-89d8-aad8b9e01f0e'
-  PropagateID: '358dc0d2-9429-4ce5-89d8-aad8b9e01f0e'
-  ReservedCode1: 'd2a65bce-727a-48f4-96da-0c92b149e22d'
-  ReservedCode2: 'd2a65bce-727a-48f4-96da-0c92b149e22d'
+  ProduceID: 'fc701113-cfc4-4d5e-b115-25f58cc12249'
+  PropagateID: 'fc701113-cfc4-4d5e-b115-25f58cc12249'
+  ReservedCode1: 'fc1e239a-50a6-44bc-bcf9-bb33cc71ac21'
+  ReservedCode2: 'fc1e239a-50a6-44bc-bcf9-bb33cc71ac21'
 ---
 
 # BOSS直聘自动投递工具
 
-基于 ADB + OCR 的 BOSS直聘自动投递桌面工具，通过安卓手机自动化操作实现批量投递简历。
+基于 ADB/HDC + OCR 的 BOSS直聘自动投递效率工具，支持安卓和鸿蒙手机，自动识别岗位信息并批量投递。
 
 ## 功能特性
 
-- **关键词过滤**：支持包含/排除关键词，中英文逗号、空格分隔
-- **薪资范围筛选**：可设定最低/最高薪资（K），自动跳过不符岗位
-- **自动投递**：点击"立即沟通"自动投递，检测到"继续沟通"则跳过
-- **防风控横滑**：智能横滑切换岗位，避开安卓边缘手势
-- **日志记录**：投递日志异步写入，`│` 分隔 + `✓/✗/↻` 图标美化
-- **配置持久化**：配置文件保存到 exe 同级目录，重启不丢失
+- **双平台支持**：安卓(ADB) + 鸿蒙(HDC)，GUI一键切换，自动记住上次选择
+- **关键词过滤**：包含/排除关键词，支持中英文逗号和空格分隔
+- **薪资筛选**：设定最低/最高薪资(K)，支持区间重叠匹配
+- **面议岗位**：可选投递薪资显示"面议"的岗位
+- **自动投递**：检测"立即沟通"自动点击，检测"继续沟通"自动跳过
+- **防重复投递**：同一公司只投递一次，持久化到JSON，重启仍有效
+- **黑名单公司**：始终跳过黑名单中的公司，GUI添加/查看/清空
+- **投递统计面板**：实时显示投递成功/跳过/重复/总计扫描/用时/成功率
+- **暂停/继续**：投递过程中随时暂停，当前步骤完成后暂停不丢进度
+- **即时停止**：停止信号立即响应，不会等延迟结束
+- **投递完成通知**：非阻塞弹窗(3秒自动关) + 自定义音效(mp3/wav/蜂鸣)
+- **投递日志双文件**：成功日志和失败日志分开，中文日期时间戳命名
+- **日志实时显示**：识别结果区滚动显示 ✓/✗/↻ 汇总行
+- **配置持久化**：所有设置自动保存，下次启动自动恢复
+- **异常自动恢复**：截图/OCR/点击/滑动/返回失败自动重试，跳过当前岗位不中断
+- **自动防风控**：随机偏移点击、1/5概率随机上滑、每10家休息5-10秒、延迟随机波动
+- **分辨率自动适配**：优先读取Override size，适配分辨率覆盖的手机
+- **设备自动重连**：检测不到设备时自动 kill-server + start-server 重试
 
 ## 技术栈
 
 - **GUI**：tkinter（原生 Python GUI）
-- **OCR**：RapidOCR（基于 ONNX Runtime，PP-OCRv4 模型）
-- **设备控制**：ADB（Android Debug Bridge）
-- **打包**：PyInstaller 单文件 exe，源码 zlib+base64 加密
+- **OCR**：RapidOCR（基于 ONNX Runtime）
+- **设备驱动**：ADB（安卓） + HDC（鸿蒙），统一抽象层
+- **打包**：PyInstaller 单文件 exe，集成 ADB/HDC/OCR 全部依赖
+- **源码加密**：zlib 压缩 + base64 编码，防止逆向
 
 ## 文件说明
 
 | 文件 | 说明 |
 |------|------|
 | `boss_gui.py` | 主程序（GUI + 投递逻辑） |
-| `boss_ocr.py` | OCR 识别模块（ADB截图 → 裁剪 → RapidOCR识别） |
+| `device_driver.py` | 设备驱动抽象层（ADB/HDC统一接口） |
+| `boss_ocr.py` | OCR 独立测试模块 |
 | `boss.ico` | 应用图标 |
-| `安装依赖.bat` | 首次运行安装所需 Python 依赖 |
-| `启动BOSS投递.bat` | 一键启动工具 |
+| `hdc/hdc.exe` | 鸿蒙设备控制工具 |
+| `hdc/libusb_shared.dll` | HDC 依赖库 |
 
 ## 使用方法
 
 ### 源码运行
 
 1. 安装 Python 3.12+，确保 ADB 已配置
-2. 运行 `安装依赖.bat` 或手动安装：
+2. 安装依赖：
    ```bash
    pip install rapidocr_onnxruntime[onnxruntime] opencv-python pillow pyclipper shapely
    ```
-3. 安卓手机开启 USB 调试，连接电脑
-4. 运行 `启动BOSS投递.bat` 或 `python boss_gui.py`
+3. 手机开启 USB 调试，连接电脑
+4. 运行：
+   ```bash
+   python boss_gui.py
+   ```
 
 ### exe 运行
 
-直接双击 exe 即可，所有依赖（ADB、OCR模型）已内置，无需额外安装。
+直接双击 exe 即可，内含 ADB、HDC、OCR 模型，无需额外安装。
+
+### 鸿蒙手机
+
+纯血鸿蒙 NEXT 不支持 ADB，需选择"鸿蒙(HDC)"平台，手机开启开发者模式。
 
 ## 打包说明
 
-使用 PyInstaller 打包为单文件 exe，支持源码加密：
+使用 PyInstaller 打包为单文件 exe，支持源码深度加密：
 
 ```bash
-# 1. 运行加密脚本
+# 1. 运行加密脚本生成加密入口
 python .temp/encrypt.py
 
-# 2. 修改 boss.spec 入口为 boss_gui_enc.py
+# 2. 修改 boss.spec：入口改为 boss_gui_enc.py，补充 hiddenimports
 
 # 3. 打包
 PyInstaller boss.spec --noconfirm
+
+# 4. 打包后回退源码和 spec 为普通版
 ```
 
 ## 注意事项
 
-- 需要安卓手机通过 USB 连接并开启调试模式
-- 手机屏幕分辨率需与工具适配（默认 1080x2400 级别）
+- 需要手机通过 USB 连接电脑，开启 USB 调试/开发者模式
+- 手机屏幕分辨率工具自动适配（优先 Override size）
 - 投递间隔建议不低于 3 秒，避免触发平台风控
+- USB 驱动为系统内核级，无法打包进 exe，需用户手动安装
+
+## 自动停止条件
+
+- 达到投递次数目标
+- 连续3次识别到同一岗位（列表到底）
+- 检测到弹窗关键词（投递上限/操作频繁/账号异常等）
+- 手动点击"停止投递"（即时响应）
 
 > AI生成
