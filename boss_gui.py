@@ -1176,7 +1176,7 @@ class BossGUI:
         self._reset_stat_panel()  # 重置统计面板
         self._init_log_files()  # 创建本次投递的日志文件
         self._set_running(True)
-        t = threading.Thread(target=self._deliver_worker, args=(min_k, max_k, include_words, exclude_words), daemon=True)
+        t = threading.Thread(target=self._deliver_worker, args=(min_k, max_k, include_words, exclude_words, allow_negotiable), daemon=True)
         t.start()
 
     def _wait_if_paused(self):
@@ -1283,7 +1283,7 @@ class BossGUI:
             self.log("[防风控] 随机上滑一次")
             self._safe_swipe(x1, y, x2, y2, duration=500)
 
-    def _deliver_worker(self, min_k, max_k, include_words, exclude_words):
+    def _deliver_worker(self, min_k, max_k, include_words, exclude_words, allow_negotiable=True):
         """自动投递子线程"""
         try:
             deliver_count = 0  # 实际投递计数（跳过不算）
