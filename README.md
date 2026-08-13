@@ -1,13 +1,4 @@
-﻿---
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '0de9c584-e5b6-47c4-bcf3-b3e0a849b722'
-  PropagateID: '0de9c584-e5b6-47c4-bcf3-b3e0a849b722'
-  ReservedCode1: '4a7a05c7-49f8-444e-8038-cf3fade39c51'
-  ReservedCode2: '4a7a05c7-49f8-444e-8038-cf3fade39c51'
----
+
 
 # BOSS直聘自动投递工具
 
