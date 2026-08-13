@@ -160,7 +160,7 @@ def check_salary(salary_text, min_k, max_k):
 
 # ============ 关键词过滤 ============
 def check_keywords(all_text, include_words, exclude_words):
-    # 去掉空格再匹配，避免OCR把"杭州"识别为"杭 州"导致匹配失败
+    # 去掉OCR结果中的空格后再匹配用户主动填写的关键词；不内置任何城市筛除规则
     compact_text = all_text.replace(" ", "")
     if exclude_words:
         for word in exclude_words:
@@ -257,11 +257,16 @@ class BossGUI:
         self._blacklist_lock = threading.Lock()  # 黑名单读写锁，防止GUI线程与投递线程并发冲突
         self._blacklist_file_lock = threading.Lock()  # 黑名单文件写锁，独立于已投递公司JSON锁
         self._log_lock = threading.Lock()  # 日志文件写锁，防止多线程并发写同一文件行交错
+        self._adb_check_in_progress = False  # 防止自动监控和手动检测并发执行ADB检查
+        self._adb_monitor_after_id = None
+        self._last_adb_status = None
+        self._closing = False
         self._blacklist = self._load_blacklist()  # 加载黑名单到内存
 
         self._build_ui()
         self._load_config()
         self._apply_platform()  # 根据配置初始化驱动
+        self._schedule_adb_monitor(800)  # 启动后自动检查，之后持续监控ADB状态
         self._preload_ocr()  # 后台预加载OCR模型
         self._update_applied_count_on_startup()  # 启动时显示已投递公司数
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -290,6 +295,12 @@ class BossGUI:
                                            values=platform_names, state="readonly", width=12)
         self.platform_combo.pack(side="left", padx=5)
         self.platform_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_platform())
+        self.btn_adb = ttk.Button(row0, text="启动/检测ADB", command=self._start_adb)
+        self.btn_adb.pack(side="left", padx=3)
+        self.adb_status_var = tk.StringVar(value="ADB: 未检测")
+        self.adb_status_label = tk.Label(row0, textvariable=self.adb_status_var,
+                                         fg="#666666", anchor="w")
+        self.adb_status_label.pack(side="left", padx=3)
 
         # 薪资
         row1 = ttk.Frame(left_col)
@@ -437,7 +448,126 @@ class BossGUI:
         driver = create_driver(platform_id)
         _set_driver(driver)
         tool_name = "ADB" if platform_id == "android" else "HDC"
+        self.btn_adb.config(state="normal" if platform_id == "android" else "disabled")
+        if platform_id == "android":
+            self._set_adb_status(None, "等待检测")
+            self._schedule_adb_monitor(200)
+        else:
+            self._set_adb_status(None, "非安卓模式")
         self._set_status(f"已切换到 {platform_label}，{tool_name}路径: {driver.adb_path if hasattr(driver, 'adb_path') else driver.hdc_path}")
+
+    def _set_adb_status(self, ok, msg):
+        """更新界面上的ADB常驻状态指示。"""
+        if ok is True:
+            text, color = "ADB: 已连接", "#16803a"
+        elif "未授权" in msg:
+            text, color = "ADB: 未授权", "#c26a00"
+        elif "offline" in msg.lower():
+            text, color = "ADB: offline", "#c26a00"
+        elif msg == "检测中":
+            text, color = "ADB: 检测中...", "#2457a6"
+        elif msg == "非安卓模式":
+            text, color = "ADB: 非安卓模式", "#666666"
+        elif msg == "等待检测":
+            text, color = "ADB: 等待检测", "#666666"
+        else:
+            text, color = "ADB: 未连接", "#b3261e"
+        self.adb_status_var.set(text)
+        self.adb_status_label.config(fg=color)
+
+    def _schedule_adb_monitor(self, delay_ms=5000):
+        """安排下一次ADB状态检测，始终由GUI线程调用。"""
+        if self._closing:
+            return
+        if self._adb_monitor_after_id is not None:
+            try:
+                self.root.after_cancel(self._adb_monitor_after_id)
+            except Exception:
+                pass
+        self._adb_monitor_after_id = self.root.after(delay_ms, self._run_adb_monitor)
+
+    def _run_adb_monitor(self):
+        """后台检查ADB设备状态，不弹窗、不阻塞GUI。"""
+        self._adb_monitor_after_id = None
+        driver = _driver
+        if driver is None or getattr(driver, "name", "") != "android":
+            self._set_adb_status(None, "非安卓模式")
+            self._schedule_adb_monitor()
+            return
+        if self._adb_check_in_progress:
+            self._schedule_adb_monitor(1000)
+            return
+
+        self._adb_check_in_progress = True
+        self._set_adb_status(None, "检测中")
+
+        def _worker():
+            try:
+                # devices命令本身会在需要时启动ADB daemon，但不会强制重启正常服务。
+                ok, msg = driver._check_devices()
+            except Exception as e:
+                ok, msg = False, f"ADB状态检查失败: {e}"
+            if not self._closing:
+                try:
+                    self.root.after(0, lambda: self._finish_adb_monitor(driver, ok, msg))
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _finish_adb_monitor(self, checked_driver, ok, msg):
+        """显示自动监控结果，并安排下一轮检测。"""
+        self._adb_check_in_progress = False
+        if checked_driver is not _driver or getattr(_driver, "name", "") != "android":
+            self._set_adb_status(None, "非安卓模式")
+            self._schedule_adb_monitor()
+            return
+        self._set_adb_status(ok, msg)
+        status_key = (ok, msg)
+        if status_key != self._last_adb_status:
+            self.log(f"[ADB监控] {msg}")
+            self._last_adb_status = status_key
+        self._schedule_adb_monitor()
+
+    def _start_adb(self):
+        """在后台启动ADB并检测手机，避免阻塞GUI。"""
+        driver = _driver
+        if driver is None or getattr(driver, "name", "") != "android":
+            messagebox.showwarning("ADB不可用", "请先将手机平台切换为安卓 (ADB)")
+            return
+        if self._adb_check_in_progress:
+            self._set_status("ADB正在检测中，请稍候...")
+            return
+
+        self._adb_check_in_progress = True
+        self.btn_adb.config(state="disabled")
+        self._set_adb_status(None, "检测中")
+        self._set_status("正在启动ADB并等待手机连接...")
+        self.log("[ADB] 正在启动服务并检测手机，请稍候...")
+
+        def _worker():
+            try:
+                ok, msg = driver.check_connection()
+            except Exception as e:
+                ok, msg = False, f"ADB启动失败: {e}"
+            self.root.after(0, lambda: self._finish_adb_check(ok, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _finish_adb_check(self, ok, msg):
+        """回到GUI线程显示ADB检测结果。"""
+        self._adb_check_in_progress = False
+        is_android = _driver is not None and getattr(_driver, "name", "") == "android"
+        self.btn_adb.config(state="normal" if is_android else "disabled")
+        self._set_adb_status(ok, msg)
+        self._last_adb_status = (ok, msg)
+        self._set_status(msg)
+        self.log(f"[ADB] {msg}")
+        self._schedule_adb_monitor()
+        if ok:
+            messagebox.showinfo("ADB连接成功", msg)
+        else:
+            messagebox.showwarning("ADB连接失败", msg)
 
     def log(self, msg):
         self.root.after(0, self._append_log, msg)
@@ -462,6 +592,27 @@ class BossGUI:
   安卓 (ADB)：通过ADB控制安卓手机，需开启USB调试。
   鸿蒙 (HDC)：通过HDC控制鸿蒙手机，需开启开发者模式。
   注意：纯血鸿蒙NEXT不支持ADB，必须选择鸿蒙(HDC)。
+
+[启动/检测ADB]  安卓手机连接后可先点击此按钮。
+                 程序会启动内置ADB并等待设备完成连接，同时显示未授权/offline等具体状态。
+                 右侧状态会在软件启动后自动检测，并持续刷新；状态变化会写入日志。
+
+[ADB状态监控]  软件打开后自动启动检测，约每5秒刷新一次，不需要先点击按钮。
+  ADB: 已连接（绿色）  → 可以截图识别或开始投递。
+  ADB: 检测中（蓝色）  → 正在启动服务或枚举设备，首次通常约需6秒，请稍候。
+  ADB: 未授权（橙色）  → 解锁手机，在USB调试授权弹窗中点击“允许”。
+  ADB: offline（橙色） → 通信异常，点击“启动/检测ADB”，仍失败则重新插拔USB。
+  ADB: 未连接（红色）  → 检查数据线、USB模式、USB调试和电脑手机驱动。
+  自动监控只在状态发生变化时写入[ADB监控]日志，不会反复弹窗或刷屏。
+
+[换电脑使用]  EXE已内置ADB，但同一台手机换到另一台电脑后，仍需重新确认USB调试授权。
+               每台电脑的ADB密钥不同，建议在手机授权框中勾选“始终允许此计算机”。
+               如果设备管理器看不到手机，需要先安装对应品牌的USB驱动。
+
+[ADB排障]  长时间检测中：等待15秒后再点击“启动/检测ADB”，不要连续点击。
+           未授权：解锁手机并允许USB调试，必要时撤销授权后重新连接。
+           offline：关闭模拟器/手机助手等可能占用ADB的软件，再手动检测。
+           未连接：切换为文件传输/MTP，更换USB接口或支持数据传输的线。
 
 二、筛选设置
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -746,6 +897,12 @@ class BossGUI:
             pass
 
     def _on_close(self):
+        self._closing = True
+        if self._adb_monitor_after_id is not None:
+            try:
+                self.root.after_cancel(self._adb_monitor_after_id)
+            except Exception:
+                pass
         self._save_config()
         self.root.destroy()
 
@@ -900,12 +1057,15 @@ class BossGUI:
         if running:
             self.root.after(0, lambda: self.btn_run.config(state="disabled"))
             self.root.after(0, lambda: self.btn_deliver.config(state="disabled"))
+            self.root.after(0, lambda: self.btn_adb.config(state="disabled"))
             self.root.after(0, lambda: self.btn_stop.config(state="normal"))
             self.root.after(0, lambda: self.btn_pause.config(state="normal", text="暂停"))
             self._pause_event.set()  # 确保非暂停状态
         else:
             self.root.after(0, lambda: self.btn_run.config(state="normal"))
             self.root.after(0, lambda: self.btn_deliver.config(state="normal"))
+            if _driver is not None and getattr(_driver, "name", "") == "android":
+                self.root.after(0, lambda: self.btn_adb.config(state="normal"))
             self.root.after(0, lambda: self.btn_stop.config(state="disabled"))
             self.root.after(0, lambda: self.btn_pause.config(state="disabled", text="暂停"))
 
@@ -1176,7 +1336,11 @@ class BossGUI:
         self._reset_stat_panel()  # 重置统计面板
         self._init_log_files()  # 创建本次投递的日志文件
         self._set_running(True)
-        t = threading.Thread(target=self._deliver_worker, args=(min_k, max_k, include_words, exclude_words), daemon=True)
+        t = threading.Thread(
+            target=self._deliver_worker,
+            args=(min_k, max_k, include_words, exclude_words, allow_negotiable),
+            daemon=True,
+        )
         t.start()
 
     def _wait_if_paused(self):
@@ -1283,7 +1447,7 @@ class BossGUI:
             self.log("[防风控] 随机上滑一次")
             self._safe_swipe(x1, y, x2, y2, duration=500)
 
-    def _deliver_worker(self, min_k, max_k, include_words, exclude_words):
+    def _deliver_worker(self, min_k, max_k, include_words, exclude_words, allow_negotiable):
         """自动投递子线程"""
         try:
             deliver_count = 0  # 实际投递计数（跳过不算）
