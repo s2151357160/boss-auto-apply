@@ -75,39 +75,66 @@ class ADBDriver(DeviceDriver):
 
     def check_connection(self):
         """检查ADB是否可用，返回 (ok, msg)
-        首次检测不到设备时，自动重启ADB服务再重试一次"""
+        ADB冷启动和USB设备枚举可能需要数秒，持续轮询而不是只检查固定两次。"""
         if not os.path.isfile(self.adb_path):
             return False, f"ADB未找到: {self.adb_path}"
-        
-        # 尝试检测设备
-        ok, msg = self._check_devices()
-        if ok:
-            return ok, msg
-        
-        # 首次没找到，重启ADB服务后重试
-        self.kill_server()
-        time.sleep(1)
+
+        # start-server 在服务已运行时会立即返回；冷启动时可能超过5秒。
         self.start_server()
-        time.sleep(2)
-        ok, msg = self._check_devices()
+        ok, msg = self._wait_for_device(timeout=10)
         if ok:
             return ok, msg
-        
-        # 仍然没有，提示用户
-        return False, "未检测到手机连接，请检查USB线和USB调试（可尝试重新插拔USB）"
+
+        # 手机已经出现但尚未授权时，重启服务无助于解决问题，直接给出准确提示。
+        if "未授权" in msg:
+            return False, msg
+
+        # 服务可能卡死或设备处于offline，重启ADB后留足时间重新枚举USB设备。
+        self.kill_server()
+        time.sleep(0.5)
+        self.start_server()
+        ok, msg = self._wait_for_device(timeout=15)
+        if ok:
+            return ok, msg
+
+        return False, msg
+
+    def _wait_for_device(self, timeout=10, interval=0.5):
+        """在限定时间内等待ADB完成服务启动和USB设备枚举。"""
+        deadline = time.monotonic() + timeout
+        last_msg = "未检测到手机"
+        while time.monotonic() < deadline:
+            ok, last_msg = self._check_devices()
+            if ok:
+                return True, last_msg
+            if "未授权" in last_msg:
+                return False, last_msg
+            time.sleep(interval)
+        return False, last_msg
 
     def _check_devices(self):
         """内部检测设备列表"""
         try:
-            r = self._run(["devices"], capture=True)
-            devices = []
+            # ADB首次启动daemon通常需要5秒以上，不能使用5秒短超时。
+            r = self._run(["devices"], timeout=TIMEOUT, capture=True)
+            states = []
             for line in r.stdout.strip().split("\n")[1:]:
                 line = line.strip()
-                if line and "device" in line and "unauthorized" not in line and "daemon" not in line:
-                    devices.append(line.split("\t")[0])
-            if not devices:
-                return False, "无设备"
-            return True, f"已连接: {devices[0]}"
+                if not line or line.startswith("*"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    states.append((parts[0], parts[1]))
+            connected = [serial for serial, state in states if state == "device"]
+            if connected:
+                return True, f"已连接: {connected[0]}"
+            unauthorized = [serial for serial, state in states if state == "unauthorized"]
+            if unauthorized:
+                return False, "已检测到手机但USB调试未授权，请解锁手机并点击“允许”"
+            offline = [serial for serial, state in states if state == "offline"]
+            if offline:
+                return False, "已检测到手机但设备处于offline，正在尝试重连"
+            return False, "未检测到手机连接，请检查USB连接模式、数据线和USB调试授权"
         except subprocess.TimeoutExpired:
             return False, "ADB命令超时"
         except Exception as e:
@@ -191,7 +218,8 @@ class ADBDriver(DeviceDriver):
     def start_server(self):
         """启动ADB服务"""
         try:
-            self._run(["start-server"])
+            # 冷启动daemon实测可能超过5秒，使用完整命令超时。
+            self._run(["start-server"], timeout=TIMEOUT, capture=True)
         except Exception:
             pass
 
