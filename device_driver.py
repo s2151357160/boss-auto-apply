@@ -7,6 +7,7 @@ import re
 import subprocess
 import time
 import random
+import shutil
 
 # ============ 常量 ============
 SUBPROC_FLAGS = 0x08000000  # CREATE_NO_WINDOW，隐藏命令行窗口
@@ -204,7 +205,6 @@ class ADBDriver(DeviceDriver):
                 self._run(["pull", remote_path, pull_tmp], timeout=TIMEOUT, check=True)
                 self._run(["shell", "rm", remote_path])
                 # 复制到最终路径（处理中文/空格路径）
-                import shutil
                 shutil.copy2(pull_tmp, save_path)
                 return True, "截图成功"
             except subprocess.TimeoutExpired:
@@ -361,13 +361,17 @@ class HDCDriver(DeviceDriver):
             try:
                 self._run(["shell", "snapshot_display", "-f", remote_path],
                           timeout=TIMEOUT, check=True)
-                self._run(["file", "recv", remote_path, save_path],
+                # 先pull到英文临时路径（避免中文/空格路径导致pull失败），再复制到最终路径
+                pull_tmp = os.path.join(os.environ.get("TEMP", "/tmp"), f"boss_hdc_pull_{os.getpid()}.jpeg")
+                self._run(["file", "recv", remote_path, pull_tmp],
                           timeout=TIMEOUT, check=True)
                 # 清理手机端截图
                 try:
                     self._run(["shell", "rm", remote_path])
                 except Exception:
                     pass
+                # 复制到最终路径（处理中文/空格路径）
+                shutil.copy2(pull_tmp, save_path)
                 return True, "截图成功"
             except subprocess.TimeoutExpired:
                 if i < max_retry - 1:

@@ -297,7 +297,7 @@ class BossGUI:
         row0 = ttk.Frame(left_col)
         row0.pack(fill="x", pady=3)
         ttk.Label(row0, text="手机平台:").pack(side="left")
-        self.platform_var = tk.StringVar(value="android")
+        self.platform_var = tk.StringVar(value="安卓 (ADB)")
         platform_names = [label for _, label in PLATFORM_OPTIONS]
         self.platform_combo = ttk.Combobox(row0, textvariable=self.platform_var,
                                            values=platform_names, state="readonly", width=12)
@@ -618,7 +618,7 @@ class BossGUI:
 七、自动防风控机制
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 每次点击带随机 +/-10 像素偏移
-- 每次识别后 1/5 概率随机上滑一次
+- 每投递完成后 1/5 概率随机上滑一次
 - 每投递10家随机休息 5~10 秒
 - 延迟自带随机波动
 
@@ -663,7 +663,8 @@ class BossGUI:
             with open(self.APPLIED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return set(data) if isinstance(data, list) else set()
-        except Exception:
+        except Exception as e:
+            self.log(f"[已投递公司] 加载失败: {e}")
             return set()
 
     def _save_applied_company(self, company):
@@ -703,7 +704,8 @@ class BossGUI:
             with open(self.BLACKLIST_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return set(data) if isinstance(data, list) else set()
-        except Exception:
+        except Exception as e:
+            self.log(f"[黑名单] 加载失败: {e}")
             return set()
 
     def _save_blacklist(self):
@@ -765,7 +767,8 @@ class BossGUI:
                 data = json.load(f)
             if not isinstance(data, list):
                 data = []
-        except Exception:
+        except Exception as e:
+            self.log(f"[已投递公司] 读取失败: {e}")
             data = []
         if not data:
             self.applied_count_var.set("(0家)")
@@ -786,7 +789,8 @@ class BossGUI:
             with open(self.APPLIED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             count = len(data) if isinstance(data, list) else 0
-        except Exception:
+        except Exception as e:
+            self.log(f"[已投递公司] 读取失败: {e}")
             count = 0
         if count == 0:
             self.applied_count_var.set("(0家)")
@@ -816,8 +820,8 @@ class BossGUI:
             else:
                 count = 0
             self.applied_count_var.set(f"({count}家)" if count > 0 else "(0家)")
-        except Exception:
-            pass
+        except Exception as e:
+            self.log(f"[已投递公司] 启动读取失败: {e}")
 
     def _on_close(self):
         self._save_config()
@@ -862,8 +866,8 @@ class BossGUI:
         try:
             with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log(f"[配置] 保存失败: {e}")
 
     def _load_config(self):
         if not os.path.isfile(self.CONFIG_FILE):
@@ -908,8 +912,8 @@ class BossGUI:
             # 恢复面议岗位开关
             if "negotiable" in cfg:
                 self.negotiable_var.set(bool(cfg["negotiable"]))
-        except Exception:
-            pass
+        except Exception as e:
+            self.log(f"[配置] 加载失败: {e}")
 
     def _append_log(self, msg):
         self.result_text.insert("end", msg + "\n")
@@ -941,7 +945,7 @@ class BossGUI:
 
     def _show_complete_notify(self, delivered, skipped, duped, scanned, elapsed_str):
         """投递完成通知：非阻塞弹窗 + 自定义音效/系统提示音"""
-        if not self.notify_var.get():
+        if not getattr(self, '_notify_enabled', True):
             return
         # 播放提示音：优先exe同级目录的notify.mp3/wav，否则回退蜂鸣音
         try:
@@ -1001,12 +1005,16 @@ class BossGUI:
             self.root.after(0, lambda: self.btn_deliver.config(state="disabled"))
             self.root.after(0, lambda: self.btn_stop.config(state="normal"))
             self.root.after(0, lambda: self.btn_pause.config(state="normal", text="暂停"))
+            self.root.after(0, lambda: self.platform_combo.config(state="disabled"))
+            self.root.after(0, lambda: self.emulator_combo.config(state="disabled"))
             self._pause_event.set()  # 确保非暂停状态
         else:
             self.root.after(0, lambda: self.btn_run.config(state="normal"))
             self.root.after(0, lambda: self.btn_deliver.config(state="normal"))
             self.root.after(0, lambda: self.btn_stop.config(state="disabled"))
             self.root.after(0, lambda: self.btn_pause.config(state="disabled", text="暂停"))
+            self.root.after(0, lambda: self.platform_combo.config(state="readonly"))
+            self.root.after(0, lambda: self.emulator_combo.config(state="readonly"))
 
     # ============ 截图识别 ============
     def _parse_salary_inputs(self):
@@ -1036,17 +1044,20 @@ class BossGUI:
         self.result_text.delete("1.0", "end")
         # 设备预检查（异步，避免阻塞UI）
         self.btn_run.config(state="disabled")
+        self.btn_deliver.config(state="disabled")
         def _do_check_and_run(ok, msg):
             if not ok:
                 self.log(f"设备检查失败: {msg}")
                 self._set_status(msg)
                 self.btn_run.config(state="normal")
+                self.btn_deliver.config(state="normal")
                 return
             min_k, max_k = self._parse_salary_inputs()
             include_words, exclude_words = self._parse_keyword_inputs()
             allow_negotiable = self.negotiable_var.get()
             self._delay_ms = self._safe_float(self.delay_entry, 3000)
             self._random_delay_ms = self._safe_float(self.random_delay_entry, 50)
+            self._stop_event.clear()  # 清除可能残留的停止信号，避免截图重试间隔为0
             self._set_running(True)
             t = threading.Thread(target=self._worker, args=(min_k, max_k, include_words, exclude_words, allow_negotiable), daemon=True)
             t.start()
@@ -1272,12 +1283,14 @@ class BossGUI:
         self.result_text.delete("1.0", "end")
         # 设备预检查（异步，避免阻塞UI）
         self.btn_deliver.config(state="disabled")
+        self.btn_run.config(state="disabled")
         def _do_deliver(ok, msg):
             if not ok:
                 self.log(f"设备检查失败: {msg}")
                 self._set_status(msg)
                 messagebox.showwarning("设备检查失败", msg)
                 self.btn_deliver.config(state="normal")
+                self.btn_run.config(state="normal")
                 return
 
             # 在主线程中一次性读取所有GUI控件的值（避免子线程访问Tkinter控件）
@@ -1285,6 +1298,7 @@ class BossGUI:
             include_words, exclude_words = self._parse_keyword_inputs()
             allow_negotiable = self.negotiable_var.get()
             dedup = self.dedup_var.get()
+            self._notify_enabled = self.notify_var.get()  # 主线程读取，供子线程安全使用
             max_count = self._safe_int(self.deliver_count_entry, 15)
             self._delay_ms = self._safe_float(self.delay_entry, 3000)
             self._random_delay_ms = self._safe_float(self.random_delay_entry, 50)
@@ -1342,8 +1356,8 @@ class BossGUI:
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(f"{sep}\n{header}\n{sep}\n")
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"[日志] 初始化失败: {path} - {e}")
 
     def _save_deliver_log(self, info, result, reason=""):
         """异步保存投递日志，投递成功和失败分别写入不同文件"""
@@ -1388,8 +1402,9 @@ class BossGUI:
             try:
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(line.rstrip() + "\n")
-            except Exception:
-                pass
+            except Exception as e:
+                # self.log通过root.after(0,...)调度到主线程，是Tkinter标准线程安全模式
+                self.log(f"[日志] 写入失败: {log_path} - {e}")
 
     def _random_up_swipe(self):
         """1/5概率随机上滑，防风控"""
