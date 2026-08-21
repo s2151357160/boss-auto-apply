@@ -4,16 +4,24 @@
 import os
 import sys
 
-# 兼容PyInstaller/Nuitka打包：frozen模式下使用exe所在目录，否则使用脚本所在目录
+# 兼容PyInstaller/Nuitka打包：确定exe所在目录作为WORK_DIR
 if getattr(sys, 'frozen', False):
+    # PyInstaller模式：sys.executable指向exe本身
     WORK_DIR = os.path.dirname(sys.executable)
-    # PyInstaller单文件模式下，datas解压到sys._MEIPASS临时目录
-    # 需要将_MEIPASS/libs加入sys.path，使rapidocr_onnxruntime等包可被import
     _meipass = getattr(sys, '_MEIPASS', '')
     if _meipass:
         _libs_in_meipass = os.path.join(_meipass, 'libs')
         if os.path.isdir(_libs_in_meipass) and _libs_in_meipass not in sys.path:
             sys.path.insert(0, _libs_in_meipass)
+elif hasattr(sys.modules.get('__main__', type('', (), {'__dict__': {}})), '__compiled__'):
+    # Nuitka模式：sys.frozen为False，但有__compiled__属性
+    # onefile模式下sys.executable指向临时解压目录，sys.argv[0]指向原始exe路径
+    WORK_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
+    # Nuitka的libs在临时目录中
+    _nuitka_tmp = os.path.dirname(sys.executable)
+    _libs_in_tmp = os.path.join(_nuitka_tmp, 'libs')
+    if os.path.isdir(_libs_in_tmp) and _libs_in_tmp not in sys.path:
+        sys.path.insert(0, _libs_in_tmp)
 else:
     # 自动添加libs目录到Python搜索路径，实现便携部署
     _libs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libs")
@@ -43,11 +51,14 @@ GREEN_HSV_MIN = (80, 100, 130)
 GREEN_HSV_MAX = (110, 255, 255)
 
 _ocr_engine = None
+_ocr_lock = threading.Lock()
 
 def _get_ocr():
     global _ocr_engine
     if _ocr_engine is None:
-        _ocr_engine = RapidOCR()
+        with _ocr_lock:
+            if _ocr_engine is None:
+                _ocr_engine = RapidOCR()
     return _ocr_engine
 
 
@@ -251,6 +262,8 @@ class BossGUI:
         self._stop_event = threading.Event()  # 线程安全的停止信号
         self._pause_event = threading.Event()  # 暂停信号：set=允许执行（运行中），clear=暂停中
         self._pause_event.set()  # 初始状态为非暂停（set表示允许执行）
+        self._delay_ms = 3000  # 操作延迟（毫秒），启动投递时从GUI读取
+        self._random_delay_ms = 50  # 随机延迟（毫秒），启动投递时从GUI读取
         self._success_log_path = ""  # 当前投递成功日志路径
         self._fail_log_path = ""     # 当前投递失败日志路径
         self._json_lock = threading.Lock()  # 已投递公司JSON文件读写锁，防止异步并发覆盖
@@ -460,10 +473,11 @@ class BossGUI:
             self.emulator_label.pack_forget()
             self.emulator_combo.pack_forget()
         else:
+            # 用 before=btn_check_conn 保持位置不变（避免pack_forget+pack导致widget排到末尾）
             if not self.emulator_label.winfo_ismapped():
-                self.emulator_label.pack(side="left", padx=(10, 0))
+                self.emulator_label.pack(side="left", padx=(10, 0), before=self.btn_check_conn)
             if not self.emulator_combo.winfo_ismapped():
-                self.emulator_combo.pack(side="left", padx=5)
+                self.emulator_combo.pack(side="left", padx=5, before=self.btn_check_conn)
         driver = create_driver(platform_id, emulator_id=emulator_id)
         _set_driver(driver)
         tool_name = "ADB" if platform_id == "android" else "HDC"
@@ -473,7 +487,10 @@ class BossGUI:
         """检测设备连接状态（按钮触发）"""
         self.btn_check_conn.config(state="disabled", text="检测中...")
         def _do_check():
-            ok, msg = _device_check()
+            try:
+                ok, msg = _device_check()
+            except Exception as e:
+                ok, msg = False, f"检测异常: {e}"
             self.root.after(0, lambda: self._on_check_done(ok, msg))
         threading.Thread(target=_do_check, daemon=True).start()
 
@@ -675,8 +692,8 @@ class BossGUI:
                         self.root.after(0, lambda n=len(data): self.applied_count_var.set(f"({n}家)"))
                     except Exception:
                         pass
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"[已投递公司] 保存失败: {e}")
 
     def _load_blacklist(self):
         """从JSON文件加载黑名单公司列表到内存"""
@@ -700,8 +717,8 @@ class BossGUI:
             try:
                 with open(self.BLACKLIST_FILE, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"[黑名单] 保存失败: {e}")
 
     def _add_blacklist(self):
         """从输入框添加公司到黑名单"""
@@ -815,6 +832,19 @@ class BossGUI:
         threading.Thread(target=_load, daemon=True).start()
 
     def _save_config(self):
+        # 保存平台和模拟器的ID而非显示标签（防止显示文本变更后无法恢复）
+        platform_label = self.platform_var.get()
+        platform_id = "android"
+        for pid, plabel in PLATFORM_OPTIONS:
+            if plabel == platform_label:
+                platform_id = pid
+                break
+        emulator_label = self.emulator_var.get()
+        emulator_id = "none"
+        for eid, elabel, _ in EMULATOR_OPTIONS:
+            if elabel == emulator_label:
+                emulator_id = eid
+                break
         cfg = {
             "min_salary": self.min_salary.get(),
             "max_salary": self.max_salary.get(),
@@ -823,8 +853,8 @@ class BossGUI:
             "delay": self.delay_entry.get(),
             "random_delay": self.random_delay_entry.get(),
             "deliver_count": self.deliver_count_entry.get(),
-            "platform": self.platform_var.get(),
-            "emulator": self.emulator_var.get(),
+            "platform": platform_id,
+            "emulator": emulator_id,
             "dedup": self.dedup_var.get(),
             "notify": self.notify_var.get(),
             "negotiable": self.negotiable_var.get(),
@@ -855,12 +885,20 @@ class BossGUI:
                     val = str(cfg[key]) if cfg[key] is not None else ""
                     entry.delete(0, "end")
                     entry.insert(0, val)
-            # 恢复平台选择
+            # 恢复平台选择（从ID反查显示标签）
             if "platform" in cfg:
-                self.platform_var.set(str(cfg["platform"]))
-            # 恢复模拟器选择
+                pid = str(cfg["platform"])
+                for _pid, _plabel in PLATFORM_OPTIONS:
+                    if _pid == pid:
+                        self.platform_var.set(_plabel)
+                        break
+            # 恢复模拟器选择（从ID反查显示标签）
             if "emulator" in cfg:
-                self.emulator_var.set(str(cfg["emulator"]))
+                eid = str(cfg["emulator"])
+                for _eid, _elabel, _ in EMULATOR_OPTIONS:
+                    if _eid == eid:
+                        self.emulator_var.set(_elabel)
+                        break
             # 恢复防重复投递开关
             if "dedup" in cfg:
                 self.dedup_var.set(bool(cfg["dedup"]))
@@ -996,23 +1034,27 @@ class BossGUI:
 
     def run(self):
         self.result_text.delete("1.0", "end")
-        # 设备预检查
-        ok, msg = _device_check()
-        if not ok:
-            self.log(f"设备检查失败: {msg}")
-            self._set_status(msg)
-            return
+        # 设备预检查（异步，避免阻塞UI）
+        self.btn_run.config(state="disabled")
+        def _do_check_and_run(ok, msg):
+            if not ok:
+                self.log(f"设备检查失败: {msg}")
+                self._set_status(msg)
+                self.btn_run.config(state="normal")
+                return
+            min_k, max_k = self._parse_salary_inputs()
+            include_words, exclude_words = self._parse_keyword_inputs()
+            allow_negotiable = self.negotiable_var.get()
+            self._delay_ms = self._safe_float(self.delay_entry, 3000)
+            self._random_delay_ms = self._safe_float(self.random_delay_entry, 50)
+            self._set_running(True)
+            t = threading.Thread(target=self._worker, args=(min_k, max_k, include_words, exclude_words, allow_negotiable), daemon=True)
+            t.start()
+        self._async_device_check(_do_check_and_run)
 
-        min_k, max_k = self._parse_salary_inputs()
-        include_words, exclude_words = self._parse_keyword_inputs()
-
-        self._set_running(True)
-        t = threading.Thread(target=self._worker, args=(min_k, max_k, include_words, exclude_words), daemon=True)
-        t.start()
-
-    def _worker(self, min_k, max_k, include_words, exclude_words):
+    def _worker(self, min_k, max_k, include_words, exclude_words, allow_negotiable=True):
         try:
-            info, skip_reason = self._do_recognize(min_k, max_k, include_words, exclude_words)
+            info, skip_reason = self._do_recognize(min_k, max_k, include_words, exclude_words, allow_negotiable)
             if skip_reason:
                 self._set_status(f"识别完成: {skip_reason}")
         except FileNotFoundError as e:
@@ -1195,17 +1237,15 @@ class BossGUI:
             return default
 
     def _delay(self):
-        """基础延迟(毫秒) ± 随机延迟(毫秒)，可被停止信号中断"""
-        base = self._safe_float(self.delay_entry, 3000)
-        rand = self._safe_float(self.random_delay_entry, 50)
-        ms = base + random.uniform(-rand, rand)
+        """基础延迟(毫秒) ± 随机延迟(毫秒)，可被停止信号中断
+        使用启动时传入的延迟参数，避免子线程读取Entry"""
+        ms = self._delay_ms + random.uniform(-self._random_delay_ms, self._random_delay_ms)
         self._stop_event.wait(max(ms, 0) / 1000)
 
     def _short_delay(self, default_sec=0.5):
         """短延迟：取操作延迟的1/3，但不超过default_sec秒，用于页面跳转/返回等短等待
         附加轻微随机波动（±50ms），防风控。可被停止信号中断"""
-        base_ms = self._safe_float(self.delay_entry, 3000)
-        sec = min(base_ms / 1000 / 3, default_sec)
+        sec = min(self._delay_ms / 1000 / 3, default_sec)
         jitter = random.uniform(-0.05, 0.05)  # ±50ms随机
         total = max(sec + jitter, 0.05)
         # 分片等待，每100ms检查一次stop信号
@@ -1218,27 +1258,48 @@ class BossGUI:
             elapsed += chunk
 
     # ============ 自动投递 ============
+    def _async_device_check(self, callback):
+        """异步设备检查，完成后在主线程回调 callback(ok, msg)"""
+        def _do_check():
+            try:
+                ok, msg = _device_check()
+            except Exception as e:
+                ok, msg = False, f"检测异常: {e}"
+            self.root.after(0, lambda: callback(ok, msg))
+        threading.Thread(target=_do_check, daemon=True).start()
+
     def start_deliver(self):
         self.result_text.delete("1.0", "end")
-        # 设备预检查
-        ok, msg = _device_check()
-        if not ok:
-            self.log(f"设备检查失败: {msg}")
-            self._set_status(msg)
-            messagebox.showwarning("设备检查失败", msg)
-            return
+        # 设备预检查（异步，避免阻塞UI）
+        self.btn_deliver.config(state="disabled")
+        def _do_deliver(ok, msg):
+            if not ok:
+                self.log(f"设备检查失败: {msg}")
+                self._set_status(msg)
+                messagebox.showwarning("设备检查失败", msg)
+                self.btn_deliver.config(state="normal")
+                return
 
-        min_k, max_k = self._parse_salary_inputs()
-        include_words, exclude_words = self._parse_keyword_inputs()
-        allow_negotiable = self.negotiable_var.get()
+            # 在主线程中一次性读取所有GUI控件的值（避免子线程访问Tkinter控件）
+            min_k, max_k = self._parse_salary_inputs()
+            include_words, exclude_words = self._parse_keyword_inputs()
+            allow_negotiable = self.negotiable_var.get()
+            dedup = self.dedup_var.get()
+            max_count = self._safe_int(self.deliver_count_entry, 15)
+            self._delay_ms = self._safe_float(self.delay_entry, 3000)
+            self._random_delay_ms = self._safe_float(self.random_delay_entry, 50)
 
-        self._stop_event.clear()
-        self._pause_event.set()  # 确保非暂停状态
-        self._reset_stat_panel()  # 重置统计面板
-        self._init_log_files()  # 创建本次投递的日志文件
-        self._set_running(True)
-        t = threading.Thread(target=self._deliver_worker, args=(min_k, max_k, include_words, exclude_words, allow_negotiable), daemon=True)
-        t.start()
+            self._stop_event.clear()
+            self._pause_event.set()  # 确保非暂停状态
+            self._reset_stat_panel()  # 重置统计面板
+            self._init_log_files()  # 创建本次投递的日志文件
+            self._set_running(True)
+            t = threading.Thread(target=self._deliver_worker,
+                                 args=(min_k, max_k, include_words, exclude_words,
+                                       allow_negotiable, dedup, max_count),
+                                 daemon=True)
+            t.start()
+        self._async_device_check(_do_deliver)
 
     def _wait_if_paused(self):
         """如果处于暂停状态，阻塞等待直到恢复或停止"""
@@ -1344,18 +1405,18 @@ class BossGUI:
             self.log("[防风控] 随机上滑一次")
             self._safe_swipe(x1, y, x2, y2, duration=500)
 
-    def _deliver_worker(self, min_k, max_k, include_words, exclude_words, allow_negotiable=True):
+    def _deliver_worker(self, min_k, max_k, include_words, exclude_words, allow_negotiable=True,
+                         dedup=False, max_count=15):
         """自动投递子线程"""
         try:
             deliver_count = 0  # 实际投递计数（跳过不算）
             skip_count = 0     # 跳过计数
             dup_count = 0      # 重复跳过计数
             scan_count = 0     # 扫描计数
-            max_count = self._safe_int(self.deliver_count_entry, 15)
             start_time = time.time()
             delivered_companies = set()  # 本次会话已投递公司名去重
             # 如果开启了防重复投递，加载历史已投递公司
-            if self.dedup_var.get():
+            if dedup:
                 loaded = self._load_applied_companies()
                 delivered_companies.update(loaded)
                 if loaded:
@@ -1401,7 +1462,6 @@ class BossGUI:
                     self._swipe_next()
                     _update_status(f"识别异常，跳过")
                     continue
-                self._random_up_swipe()  # 识别完成后1/5概率随机上滑防风控
 
                 # ---- 横滑到底检测 ----
                 current_job_key = f"{info.get('company', '')}|{info.get('job', '')}"
@@ -1559,6 +1619,9 @@ class BossGUI:
                 self._save_deliver_log(info, "投递")
                 self._log_summary("✓", info)
                 _update_status()
+
+                # 1/5概率随机上滑防风控（放在投递完成后，不影响后续按钮检测）
+                self._random_up_swipe()
 
                 # 每投递10个随机休息5-10秒（可被停止信号中断）
                 if deliver_count % 10 == 0:

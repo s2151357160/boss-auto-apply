@@ -42,7 +42,7 @@ class DeviceDriver:
         """检查设备连接，返回 (ok, msg)"""
         raise NotImplementedError
 
-    def screenshot(self, save_path):
+    def screenshot(self, save_path, max_retry=3):
         """截图并保存到本地路径，返回 (ok, msg)"""
         raise NotImplementedError
 
@@ -80,11 +80,17 @@ class ADBDriver(DeviceDriver):
     def __init__(self, adb_path, emulator_port=0):
         self.adb_path = adb_path
         self.emulator_port = emulator_port  # 0=真机USB，>0=模拟器网络ADB端口
+        self._serial = None  # 目标设备序列号，多设备时用于-s参数
         self._screen_size = None
 
-    def _run(self, args, timeout=SHORT_TIMEOUT, check=False, capture=False):
-        """执行ADB命令的统一封装"""
-        cmd = [self.adb_path] + args
+    def _run(self, args, timeout=SHORT_TIMEOUT, check=False, capture=False, target=True):
+        """执行ADB命令的统一封装
+        target=True时自动添加-s序列号（shell/pull等设备级命令）
+        target=False时不添加（devices/connect/kill-server等服务级命令）"""
+        cmd = [self.adb_path]
+        if target and self._serial:
+            cmd += ['-s', self._serial]
+        cmd += args
         kwargs = dict(timeout=timeout, creationflags=SUBPROC_FLAGS)
         if capture:
             kwargs["capture_output"] = True
@@ -137,7 +143,7 @@ class ADBDriver(DeviceDriver):
     def _connect_emulator(self, addr):
         """连接模拟器（网络ADB），返回 (ok, msg)"""
         try:
-            r = self._run(["connect", addr], timeout=5, capture=True)
+            r = self._run(["connect", addr], timeout=5, capture=True, target=False)
             out = r.stdout.strip()
             # adb connect 成功输出含 "connected"，已连接含 "already connected"
             if "connected" in out:
@@ -148,32 +154,58 @@ class ADBDriver(DeviceDriver):
             return False, str(e)
 
     def _check_devices(self):
-        """内部检测设备列表"""
+        """内部检测设备列表，同时设置self._serial（多设备时选目标设备）"""
         try:
-            r = self._run(["devices"], capture=True)
+            r = self._run(["devices"], capture=True, target=False)
             devices = []
             for line in r.stdout.strip().split("\n")[1:]:
                 line = line.strip()
-                if line and "device" in line and "unauthorized" not in line and "daemon" not in line:
-                    # 兼容tab和空格分隔（不同ADB版本/模拟器输出格式不同）
-                    parts = line.replace("\t", " ").split()
-                    if parts:
-                        devices.append(parts[0])
+                if not line:
+                    continue
+                # 按列匹配：设备行格式为 "序列号\t状态"，状态列必须为 "device"
+                parts = line.replace("\t", " ").split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    devices.append(parts[0])
             if not devices:
+                self._serial = None
                 return False, "无设备"
-            return True, f"已连接: {devices[0]}"
+            
+            # 模拟器模式：优先匹配端口地址
+            if self.emulator_port > 0:
+                addr = f"127.0.0.1:{self.emulator_port}"
+                if addr in devices:
+                    self._serial = addr
+                else:
+                    # 地址不匹配时报错而非盲目取第一个（避免误操作其他模拟器）
+                    self._serial = None
+                    return False, f"模拟器未连接: {addr}，当前设备列表: {devices}，请确认模拟器已启动且端口正确"
+            else:
+                # 真机模式：优先USB设备（排除emulator-*和IP:端口格式的模拟器/网络设备）
+                usb_devices = [d for d in devices if not d.startswith("emulator-") and ":" not in d]
+                if usb_devices:
+                    self._serial = usb_devices[0]
+                else:
+                    self._serial = devices[0]  # 回退：取第一个
+            
+            return True, f"已连接: {self._serial}"
         except subprocess.TimeoutExpired:
             return False, "ADB命令超时"
         except Exception as e:
             return False, f"ADB检查失败: {e}"
 
     def screenshot(self, save_path, max_retry=3):
-        """ADB截图，失败自动重试"""
+        """ADB截图，失败自动重试
+        远程路径加PID后缀避免多实例共享冲突；pull到英文临时路径再复制到中文路径"""
+        remote_path = f"/sdcard/screenshot_{os.getpid()}.png"
+        pull_tmp = os.path.join(os.environ.get("TEMP", "/tmp"), f"boss_pull_{os.getpid()}.png")
         for i in range(max_retry):
             try:
-                self._run(["shell", "screencap", "-p", "/sdcard/screenshot.png"], timeout=TIMEOUT, check=True)
-                self._run(["pull", "/sdcard/screenshot.png", save_path], timeout=TIMEOUT, check=True)
-                self._run(["shell", "rm", "/sdcard/screenshot.png"])
+                self._run(["shell", "screencap", "-p", remote_path], timeout=TIMEOUT, check=True)
+                self._run(["pull", remote_path, pull_tmp], timeout=TIMEOUT, check=True)
+                self._run(["shell", "rm", remote_path])
+                # 复制到最终路径（处理中文/空格路径）
+                import shutil
+                shutil.copy2(pull_tmp, save_path)
                 return True, "截图成功"
             except subprocess.TimeoutExpired:
                 if i < max_retry - 1:
@@ -194,15 +226,15 @@ class ADBDriver(DeviceDriver):
         return False, "截图失败"
 
     def tap(self, x, y, offset=10):
-        """随机偏移点击"""
+        """随机偏移点击，check=True确保失败时抛异常"""
         rx = max(0, x + random.randint(-offset, offset))
         ry = max(0, y + random.randint(-offset, offset))
-        self._run(["shell", "input", "tap", str(rx), str(ry)])
+        self._run(["shell", "input", "tap", str(rx), str(ry)], check=True)
 
     def swipe(self, x1, y1, x2, y2, duration=500):
-        """滑动操作，duration最低500ms兼容更多ROM"""
+        """滑动操作，duration最低500ms兼容更多ROM，check=True确保失败时抛异常"""
         duration = max(duration, 500)
-        self._run(["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)])
+        self._run(["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)], check=True)
 
     def get_screen_size(self):
         """获取屏幕分辨率（缓存结果）
@@ -238,14 +270,14 @@ class ADBDriver(DeviceDriver):
     def kill_server(self):
         """关闭ADB服务"""
         try:
-            self._run(["kill-server"])
+            self._run(["kill-server"], target=False)
         except Exception:
             pass
 
     def start_server(self):
         """启动ADB服务"""
         try:
-            self._run(["start-server"])
+            self._run(["start-server"], target=False)
         except Exception:
             pass
 
@@ -258,11 +290,17 @@ class HDCDriver(DeviceDriver):
 
     def __init__(self, hdc_path):
         self.hdc_path = hdc_path
+        self._serial = None  # 目标设备序列号，多设备时用于-t参数
         self._screen_size = None
 
-    def _run(self, args, timeout=SHORT_TIMEOUT, check=False, capture=False):
-        """执行HDC命令的统一封装"""
-        cmd = [self.hdc_path] + args
+    def _run(self, args, timeout=SHORT_TIMEOUT, check=False, capture=False, target=True):
+        """执行HDC命令的统一封装
+        target=True时自动添加-t序列号（shell/file等设备级命令）
+        target=False时不添加（list/kill等服务级命令）"""
+        cmd = [self.hdc_path]
+        if target and self._serial:
+            cmd += ['-t', self._serial]
+        cmd += args
         kwargs = dict(timeout=timeout, creationflags=SUBPROC_FLAGS)
         if capture:
             kwargs["capture_output"] = True
@@ -293,9 +331,9 @@ class HDCDriver(DeviceDriver):
         return False, "未检测到鸿蒙设备连接，请检查USB线和开发者模式（可尝试重新插拔USB）"
 
     def _check_targets(self):
-        """内部检测设备列表"""
+        """内部检测设备列表，同时设置self._serial"""
         try:
-            r = self._run(["list", "targets"], capture=True)
+            r = self._run(["list", "targets"], capture=True, target=False)
             lines = r.stdout.strip().split("\n")
             devices = []
             for line in lines:
@@ -303,8 +341,10 @@ class HDCDriver(DeviceDriver):
                 if line and line != "[Empty]" and not line.startswith("["):
                     devices.append(line)
             if not devices:
+                self._serial = None
                 return False, "无设备"
-            return True, f"已连接: {devices[0]}"
+            self._serial = devices[0]
+            return True, f"已连接: {self._serial}"
         except subprocess.TimeoutExpired:
             return False, "HDC命令超时"
         except Exception as e:
@@ -314,8 +354,9 @@ class HDCDriver(DeviceDriver):
         """HDC截图，失败自动重试
         鸿蒙截图命令：hdc shell snapshot_display -f /data/local/tmp/screenshot.jpeg
         注意：鸿蒙 snapshot_display 只支持 .jpeg 后缀，不能用 .png
-        拉取命令：hdc file recv /data/local/tmp/screenshot.jpeg local_path"""
-        remote_path = "/data/local/tmp/screenshot.jpeg"
+        拉取命令：hdc file recv /data/local/tmp/screenshot.jpeg local_path
+        远程路径加PID后缀避免多实例共享冲突"""
+        remote_path = f"/data/local/tmp/screenshot_{os.getpid()}.jpeg"
         for i in range(max_retry):
             try:
                 self._run(["shell", "snapshot_display", "-f", remote_path],
@@ -347,14 +388,14 @@ class HDCDriver(DeviceDriver):
         return False, "截图失败"
 
     def tap(self, x, y, offset=10):
-        """随机偏移点击
+        """随机偏移点击，check=True确保失败时抛异常
         鸿蒙点击命令：hdc shell uitest uiInput click x y"""
         rx = max(0, x + random.randint(-offset, offset))
         ry = max(0, y + random.randint(-offset, offset))
-        self._run(["shell", "uitest", "uiInput", "click", str(rx), str(ry)])
+        self._run(["shell", "uitest", "uiInput", "click", str(rx), str(ry)], check=True)
 
     def swipe(self, x1, y1, x2, y2, duration=500):
-        """滑动操作
+        """滑动操作，check=True确保失败时抛异常
         鸿蒙滑动命令：hdc shell uitest uiInput swipe x1 y1 x2 y2 [velocity]
         velocity范围200-40000，根据duration换算：velocity = 距离/duration*1000
         但duration太短(<200ms)或太长(>2s)时使用固定值1500"""
@@ -363,7 +404,7 @@ class HDCDriver(DeviceDriver):
             velocity = int(min(max(distance / duration * 1000, 200), 40000))
         else:
             velocity = 1500
-        self._run(["shell", "uitest", "uiInput", "swipe", str(x1), str(y1), str(x2), str(y2), str(velocity)])
+        self._run(["shell", "uitest", "uiInput", "swipe", str(x1), str(y1), str(x2), str(y2), str(velocity)], check=True)
 
     def get_screen_size(self):
         """获取屏幕分辨率（缓存结果）
@@ -403,7 +444,7 @@ class HDCDriver(DeviceDriver):
     def kill_server(self):
         """关闭HDC服务"""
         try:
-            self._run(["kill"])
+            self._run(["kill"], target=False)
         except Exception:
             pass
 
@@ -430,13 +471,23 @@ def create_driver(platform, tool_dir=None, emulator_id="none"):
 
 
 def _find_tool(exe_name, sub_dir, tool_dir=None):
-    """查找工具路径，优先级：_MEIPASS > tool_dir > WORK_DIR > 脚本目录"""
+    """查找工具路径，优先级：_MEIPASS > Nuitka临时目录 > tool_dir > WORK_DIR > 脚本目录"""
     # 1. PyInstaller 打包模式：从 _MEIPASS 临时目录查找
     _meipass = getattr(sys, '_MEIPASS', '')
     if _meipass:
         path = os.path.join(_meipass, sub_dir, exe_name)
         if os.path.isfile(path):
             return path
+
+    # 1b. Nuitka打包模式：从临时解压目录查找（sys.executable指向onefile临时目录）
+    if not _meipass and not getattr(sys, 'frozen', False):
+        # Nuitka: frozen=False但__compiled__存在
+        _main = sys.modules.get('__main__')
+        if _main and hasattr(_main, '__compiled__'):
+            _nuitka_tmp = os.path.dirname(sys.executable)
+            path = os.path.join(_nuitka_tmp, sub_dir, exe_name)
+            if os.path.isfile(path):
+                return path
 
     # 2. 指定的工具目录
     if tool_dir:
@@ -449,9 +500,15 @@ def _find_tool(exe_name, sub_dir, tool_dir=None):
 
     # 3. WORK_DIR（exe同级目录或脚本同级目录）
     if getattr(sys, 'frozen', False):
+        # PyInstaller: sys.executable指向exe本身
         work_dir = os.path.dirname(sys.executable)
     else:
-        work_dir = os.path.dirname(os.path.abspath(__file__))
+        # Nuitka: sys.argv[0]指向原始exe路径；脚本模式: __file__指向源码
+        _main = sys.modules.get('__main__')
+        if _main and hasattr(_main, '__compiled__'):
+            work_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        else:
+            work_dir = os.path.dirname(os.path.abspath(__file__))
 
     path = os.path.join(work_dir, sub_dir, exe_name)
     if os.path.isfile(path):
