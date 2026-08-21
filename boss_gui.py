@@ -763,8 +763,9 @@ class BossGUI:
             messagebox.showinfo("已投递公司", "暂无已投递公司记录")
             return
         try:
-            with open(self.APPLIED_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            with self._json_lock:
+                with open(self.APPLIED_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
             if not isinstance(data, list):
                 data = []
         except Exception as e:
@@ -786,9 +787,10 @@ class BossGUI:
             self.applied_count_var.set("(0家)")
             return
         try:
-            with open(self.APPLIED_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            count = len(data) if isinstance(data, list) else 0
+            with self._json_lock:
+                with open(self.APPLIED_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                count = len(data) if isinstance(data, list) else 0
         except Exception as e:
             self.log(f"[已投递公司] 读取失败: {e}")
             count = 0
@@ -797,8 +799,9 @@ class BossGUI:
             return
         if messagebox.askyesno("清空已投递公司", f"确定清空已投递公司记录（共 {count} 家）？\n清空后防重复投递将无历史数据可参考"):
             try:
-                with open(self.APPLIED_FILE, "w", encoding="utf-8") as f:
-                    json.dump([], f, ensure_ascii=False, indent=2)
+                with self._json_lock:
+                    with open(self.APPLIED_FILE, "w", encoding="utf-8") as f:
+                        json.dump([], f, ensure_ascii=False, indent=2)
                 self.applied_count_var.set("(0家)")
                 self.log("[已投递公司] 已清空")
             except Exception as e:
@@ -824,6 +827,7 @@ class BossGUI:
             self.log(f"[已投递公司] 启动读取失败: {e}")
 
     def _on_close(self):
+        self._stop_event.set()  # 通知工作线程停止，避免root销毁后root.after抛TclError
         self._save_config()
         self.root.destroy()
 
@@ -1007,6 +1011,7 @@ class BossGUI:
             self.root.after(0, lambda: self.btn_pause.config(state="normal", text="暂停"))
             self.root.after(0, lambda: self.platform_combo.config(state="disabled"))
             self.root.after(0, lambda: self.emulator_combo.config(state="disabled"))
+            self.root.after(0, lambda: self.btn_check_conn.config(state="disabled"))
             self._pause_event.set()  # 确保非暂停状态
         else:
             self.root.after(0, lambda: self.btn_run.config(state="normal"))
@@ -1015,6 +1020,7 @@ class BossGUI:
             self.root.after(0, lambda: self.btn_pause.config(state="disabled", text="暂停"))
             self.root.after(0, lambda: self.platform_combo.config(state="readonly"))
             self.root.after(0, lambda: self.emulator_combo.config(state="readonly"))
+            self.root.after(0, lambda: self.btn_check_conn.config(state="normal"))
 
     # ============ 截图识别 ============
     def _parse_salary_inputs(self):
@@ -1045,12 +1051,14 @@ class BossGUI:
         # 设备预检查（异步，避免阻塞UI）
         self.btn_run.config(state="disabled")
         self.btn_deliver.config(state="disabled")
+        self.btn_check_conn.config(state="disabled")
         def _do_check_and_run(ok, msg):
             if not ok:
                 self.log(f"设备检查失败: {msg}")
                 self._set_status(msg)
                 self.btn_run.config(state="normal")
                 self.btn_deliver.config(state="normal")
+                self.btn_check_conn.config(state="normal")
                 return
             min_k, max_k = self._parse_salary_inputs()
             include_words, exclude_words = self._parse_keyword_inputs()
@@ -1284,6 +1292,7 @@ class BossGUI:
         # 设备预检查（异步，避免阻塞UI）
         self.btn_deliver.config(state="disabled")
         self.btn_run.config(state="disabled")
+        self.btn_check_conn.config(state="disabled")
         def _do_deliver(ok, msg):
             if not ok:
                 self.log(f"设备检查失败: {msg}")
@@ -1291,6 +1300,7 @@ class BossGUI:
                 messagebox.showwarning("设备检查失败", msg)
                 self.btn_deliver.config(state="normal")
                 self.btn_run.config(state="normal")
+                self.btn_check_conn.config(state="normal")
                 return
 
             # 在主线程中一次性读取所有GUI控件的值（避免子线程访问Tkinter控件）
