@@ -13,6 +13,25 @@ SUBPROC_FLAGS = 0x08000000  # CREATE_NO_WINDOW，隐藏命令行窗口
 TIMEOUT = 15
 SHORT_TIMEOUT = 5
 
+# ============ 模拟器端口映射 ============
+# 名称 -> ADB连接地址，端口为0表示真机（USB连接，无需connect）
+EMULATOR_OPTIONS = [
+    ("none",   "真机 (USB)",       0),
+    ("mumu12", "MuMu模拟器12",     16384),
+    ("mumu6",  "MuMu模拟器6",      7555),
+    ("ldx",    "雷电模拟器",       5555),
+    ("yeshen", "夜神模拟器",       62001),
+    ("xiaoyao", "逍遥模拟器",      21503),
+]
+
+
+def get_emulator_port(emulator_id):
+    """根据模拟器ID返回ADB端口，真机返回0"""
+    for eid, _, port in EMULATOR_OPTIONS:
+        if eid == emulator_id:
+            return port
+    return 0
+
 # ============ 驱动基类 ============
 class DeviceDriver:
     """设备驱动基类，定义统一接口"""
@@ -58,8 +77,9 @@ class ADBDriver(DeviceDriver):
 
     name = "android"
 
-    def __init__(self, adb_path):
+    def __init__(self, adb_path, emulator_port=0):
         self.adb_path = adb_path
+        self.emulator_port = emulator_port  # 0=真机USB，>0=模拟器网络ADB端口
         self._screen_size = None
 
     def _run(self, args, timeout=SHORT_TIMEOUT, check=False, capture=False):
@@ -75,10 +95,28 @@ class ADBDriver(DeviceDriver):
 
     def check_connection(self):
         """检查ADB是否可用，返回 (ok, msg)
-        首次检测不到设备时，自动重启ADB服务再重试一次"""
+        模拟器模式：先adb connect再检测
+        真机模式：首次检测不到设备时，自动重启ADB服务再重试一次"""
         if not os.path.isfile(self.adb_path):
             return False, f"ADB未找到: {self.adb_path}"
         
+        # 模拟器模式：先connect再检测
+        if self.emulator_port > 0:
+            addr = f"127.0.0.1:{self.emulator_port}"
+            conn_ok, conn_msg = self._connect_emulator(addr)
+            ok, msg = self._check_devices()
+            if ok:
+                return ok, msg
+            # 重试一次
+            if not conn_ok:
+                self._connect_emulator(addr)
+            time.sleep(1)
+            ok, msg = self._check_devices()
+            if ok:
+                return ok, msg
+            return False, f"模拟器未连接: {addr}，请确认模拟器已启动且端口正确"
+        
+        # 真机模式：原有逻辑
         # 尝试检测设备
         ok, msg = self._check_devices()
         if ok:
@@ -96,6 +134,19 @@ class ADBDriver(DeviceDriver):
         # 仍然没有，提示用户
         return False, "未检测到手机连接，请检查USB线和USB调试（可尝试重新插拔USB）"
 
+    def _connect_emulator(self, addr):
+        """连接模拟器（网络ADB），返回 (ok, msg)"""
+        try:
+            r = self._run(["connect", addr], timeout=5, capture=True)
+            out = r.stdout.strip()
+            # adb connect 成功输出含 "connected"，已连接含 "already connected"
+            if "connected" in out:
+                return True, out
+            # "failed to connect" / "cannot connect" 等视为失败
+            return False, out
+        except Exception as e:
+            return False, str(e)
+
     def _check_devices(self):
         """内部检测设备列表"""
         try:
@@ -104,7 +155,10 @@ class ADBDriver(DeviceDriver):
             for line in r.stdout.strip().split("\n")[1:]:
                 line = line.strip()
                 if line and "device" in line and "unauthorized" not in line and "daemon" not in line:
-                    devices.append(line.split("\t")[0])
+                    # 兼容tab和空格分隔（不同ADB版本/模拟器输出格式不同）
+                    parts = line.replace("\t", " ").split()
+                    if parts:
+                        devices.append(parts[0])
             if not devices:
                 return False, "无设备"
             return True, f"已连接: {devices[0]}"
@@ -359,13 +413,15 @@ class HDCDriver(DeviceDriver):
 
 
 # ============ 驱动工厂 ============
-def create_driver(platform, tool_dir=None):
+def create_driver(platform, tool_dir=None, emulator_id="none"):
     """根据平台创建驱动实例
     platform: 'android' 或 'harmony'
-    tool_dir: 平台工具所在目录，None则自动查找"""
+    tool_dir: 平台工具所在目录，None则自动查找
+    emulator_id: 模拟器ID，'none'=真机USB，其他为模拟器网络ADB"""
     if platform == "android":
         adb_path = _find_tool("adb.exe", "platform-tools", tool_dir)
-        return ADBDriver(adb_path)
+        emu_port = get_emulator_port(emulator_id)
+        return ADBDriver(adb_path, emulator_port=emu_port)
     elif platform == "harmony":
         hdc_path = _find_tool("hdc.exe", "hdc", tool_dir)
         return HDCDriver(hdc_path)

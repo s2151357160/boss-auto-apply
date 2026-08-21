@@ -32,7 +32,7 @@ import numpy as np
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from rapidocr_onnxruntime import RapidOCR
-from device_driver import create_driver, PLATFORM_OPTIONS
+from device_driver import create_driver, PLATFORM_OPTIONS, EMULATOR_OPTIONS, get_emulator_port
 
 # ============ 配置 ============
 # WORK_DIR 已在文件顶部根据frozen/脚本模式设置
@@ -291,6 +291,20 @@ class BossGUI:
         self.platform_combo.pack(side="left", padx=5)
         self.platform_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_platform())
 
+        # 模拟器选择（仅安卓平台显示）
+        self.emulator_label = ttk.Label(row0, text="设备:")
+        self.emulator_label.pack(side="left", padx=(10, 0))
+        self.emulator_var = tk.StringVar(value="真机 (USB)")
+        emulator_names = [label for _, label, _ in EMULATOR_OPTIONS]
+        self.emulator_combo = ttk.Combobox(row0, textvariable=self.emulator_var,
+                                           values=emulator_names, state="readonly", width=12)
+        self.emulator_combo.pack(side="left", padx=5)
+        self.emulator_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_platform())
+
+        # 连接检测按钮
+        self.btn_check_conn = ttk.Button(row0, text="检测连接", command=self._check_device_connection, width=10)
+        self.btn_check_conn.pack(side="left", padx=5)
+
         # 薪资
         row1 = ttk.Frame(left_col)
         row1.pack(fill="x", pady=3)
@@ -434,10 +448,44 @@ class BossGUI:
             if plabel == platform_label:
                 platform_id = pid
                 break
-        driver = create_driver(platform_id)
+        # 从显示标签反查模拟器ID
+        emulator_label = self.emulator_var.get()
+        emulator_id = "none"
+        for eid, elabel, _ in EMULATOR_OPTIONS:
+            if elabel == emulator_label:
+                emulator_id = eid
+                break
+        # 鸿蒙平台不支持模拟器，隐藏模拟器Label和下拉框
+        if platform_id == "harmony":
+            self.emulator_label.pack_forget()
+            self.emulator_combo.pack_forget()
+        else:
+            if not self.emulator_label.winfo_ismapped():
+                self.emulator_label.pack(side="left", padx=(10, 0))
+            if not self.emulator_combo.winfo_ismapped():
+                self.emulator_combo.pack(side="left", padx=5)
+        driver = create_driver(platform_id, emulator_id=emulator_id)
         _set_driver(driver)
         tool_name = "ADB" if platform_id == "android" else "HDC"
         self._set_status(f"已切换到 {platform_label}，{tool_name}路径: {driver.adb_path if hasattr(driver, 'adb_path') else driver.hdc_path}")
+
+    def _check_device_connection(self):
+        """检测设备连接状态（按钮触发）"""
+        self.btn_check_conn.config(state="disabled", text="检测中...")
+        def _do_check():
+            ok, msg = _device_check()
+            self.root.after(0, lambda: self._on_check_done(ok, msg))
+        threading.Thread(target=_do_check, daemon=True).start()
+
+    def _on_check_done(self, ok, msg):
+        """检测完成回调"""
+        self.btn_check_conn.config(state="normal", text="检测连接")
+        if ok:
+            self._set_status(f"设备已连接: {msg}")
+            self.log(f"[设备检测] ✓ {msg}")
+        else:
+            self._set_status(f"设备未连接: {msg}")
+            self.log(f"[设备检测] ✗ {msg}")
 
     def log(self, msg):
         self.root.after(0, self._append_log, msg)
@@ -462,6 +510,15 @@ class BossGUI:
   安卓 (ADB)：通过ADB控制安卓手机，需开启USB调试。
   鸿蒙 (HDC)：通过HDC控制鸿蒙手机，需开启开发者模式。
   注意：纯血鸿蒙NEXT不支持ADB，必须选择鸿蒙(HDC)。
+
+[设备]  选择连接方式（仅安卓平台显示，鸿蒙自动隐藏）。
+  真机 (USB)：通过USB数据线连接真机，需开启USB调试。
+  MuMu模拟器12：网络ADB连接，端口16384，需先启动模拟器。
+  MuMu模拟器6：网络ADB连接，端口7555，需先启动模拟器。
+  雷电模拟器：网络ADB连接，端口5555，需先启动模拟器。
+  夜神模拟器：网络ADB连接，端口62001，需先启动模拟器。
+  逍遥模拟器：网络ADB连接，端口21503，需先启动模拟器。
+  注意：选择模拟器后需先启动模拟器再点击开始投递，程序会自动adb connect。
 
 二、筛选设置
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -767,6 +824,7 @@ class BossGUI:
             "random_delay": self.random_delay_entry.get(),
             "deliver_count": self.deliver_count_entry.get(),
             "platform": self.platform_var.get(),
+            "emulator": self.emulator_var.get(),
             "dedup": self.dedup_var.get(),
             "notify": self.notify_var.get(),
             "negotiable": self.negotiable_var.get(),
@@ -800,6 +858,9 @@ class BossGUI:
             # 恢复平台选择
             if "platform" in cfg:
                 self.platform_var.set(str(cfg["platform"]))
+            # 恢复模拟器选择
+            if "emulator" in cfg:
+                self.emulator_var.set(str(cfg["emulator"]))
             # 恢复防重复投递开关
             if "dedup" in cfg:
                 self.dedup_var.set(bool(cfg["dedup"]))
@@ -1176,7 +1237,7 @@ class BossGUI:
         self._reset_stat_panel()  # 重置统计面板
         self._init_log_files()  # 创建本次投递的日志文件
         self._set_running(True)
-        t = threading.Thread(target=self._deliver_worker, args=(min_k, max_k, include_words, exclude_words), daemon=True)
+        t = threading.Thread(target=self._deliver_worker, args=(min_k, max_k, include_words, exclude_words, allow_negotiable), daemon=True)
         t.start()
 
     def _wait_if_paused(self):
@@ -1283,7 +1344,7 @@ class BossGUI:
             self.log("[防风控] 随机上滑一次")
             self._safe_swipe(x1, y, x2, y2, duration=500)
 
-    def _deliver_worker(self, min_k, max_k, include_words, exclude_words):
+    def _deliver_worker(self, min_k, max_k, include_words, exclude_words, allow_negotiable=True):
         """自动投递子线程"""
         try:
             deliver_count = 0  # 实际投递计数（跳过不算）
