@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '6e773440-a17a-460b-8781-a7421ae603e2'
-  PropagateID: '6e773440-a17a-460b-8781-a7421ae603e2'
-  ReservedCode1: 'fbfd3347-404a-4542-ae39-ec2c978eff60'
-  ReservedCode2: 'fbfd3347-404a-4542-ae39-ec2c978eff60'
+  ProduceID: 'a73d13da-15b4-48cc-9767-a30c0ec03138'
+  PropagateID: 'a73d13da-15b4-48cc-9767-a30c0ec03138'
+  ReservedCode1: '7fdae16a-d56a-4434-821a-6632a1670e1a'
+  ReservedCode2: '7fdae16a-d56a-4434-821a-6632a1670e1a'
 ---
 
 # BOSS直聘自动投递工具
@@ -33,6 +33,8 @@ AIGC:
 - **配置持久化**：所有设置自动保存，下次启动自动恢复
 - **异常自动恢复**：截图/OCR/点击/滑动/返回失败自动重试，跳过当前岗位不中断
 - **自动防风控**：随机偏移点击、每投递完成后1/5概率随机上滑、每10家休息5-10秒、延迟随机波动
+- **每日资讯**：一键抓取程序员新闻/GitHub热门三档/IT行业动态/大模型资讯，独立窗口展示不阻塞投递
+- **英中翻译**：双API容灾(有道为主+MyMemory兜底)+批量翻译，英文标题/描述自动译为中文
 - **分辨率自动适配**：优先读取Override size，适配分辨率覆盖的手机
 - **设备自动重连**：检测不到设备时自动 kill-server + start-server 重试
 - **线程安全**：子线程不直接访问Tkinter控件，按钮互斥禁用防并发，JSON读写加锁防竞态
@@ -43,6 +45,8 @@ AIGC:
 - **GUI**：tkinter（原生 Python GUI）
 - **OCR**：RapidOCR（基于 ONNX Runtime）
 - **设备驱动**：ADB（安卓） + HDC（鸿蒙），统一抽象层
+- **资讯抓取**：requests + RSS/XML解析，ThreadPoolExecutor并行抓取
+- **翻译**：有道AI翻译(主) + MyMemory(备)，批量翻译降低API调用次数
 - **打包**：Nuitka 全编译（Python → C → 机器码，源码不可逆向）
 
 ## 文件说明
@@ -50,6 +54,7 @@ AIGC:
 | 文件/目录 | 说明 |
 |-----------|------|
 | `boss_gui.py` | 主程序（GUI + 投递逻辑） |
+| `news_fetcher.py` | 每日资讯聚合模块（程序员新闻/GitHub热门/IT动态/大模型资讯+英中翻译） |
 | `device_driver.py` | 设备驱动抽象层（ADB/HDC统一接口） |
 | `boss_ocr.py` | OCR 独立测试模块 |
 | `boss.ico` | 应用图标 |
