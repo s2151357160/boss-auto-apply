@@ -41,6 +41,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from rapidocr_onnxruntime import RapidOCR
 from device_driver import create_driver, PLATFORM_OPTIONS, EMULATOR_OPTIONS, get_emulator_port
+from news_fetcher import build_report
 
 # ============ 配置 ============
 # WORK_DIR 已在文件顶部根据frozen/脚本模式设置
@@ -271,6 +272,7 @@ class BossGUI:
         self._blacklist_file_lock = threading.Lock()  # 黑名单文件写锁，独立于已投递公司JSON锁
         self._log_lock = threading.Lock()  # 日志文件写锁，防止多线程并发写同一文件行交错
         self._blacklist = self._load_blacklist()  # 加载黑名单到内存
+        self._news_win = None  # 资讯窗口引用，防止重复创建
 
         self._build_ui()
         self._load_config()
@@ -420,6 +422,8 @@ class BossGUI:
         self.btn_stop = ttk.Button(frame_btn, text="停止投递", command=self.stop_deliver, state="disabled")
         self.btn_stop.pack(side="left", padx=5)
         ttk.Button(frame_btn, text="清空日志", command=self._clear_log).pack(side="left", padx=5)
+        self.btn_news = ttk.Button(frame_btn, text="每日资讯", command=self._fetch_news)
+        self.btn_news.pack(side="left", padx=5)
         ttk.Button(frame_btn, text="使用说明", command=self._show_help).pack(side="left", padx=5)
 
         # ---- 投递统计面板 ----
@@ -603,6 +607,10 @@ class BossGUI:
 
 [清空日志]  清空下方识别结果文本区的内容。
 
+[每日资讯]  点击后后台抓取每日科技资讯（程序员新闻、GitHub热门三档、IT行业动态、
+           大模型资讯），抓取过程不阻塞界面、不影响投递。           约10-20秒后在独立窗口展示。
+           抓取中按钮显示"抓取中..."，完成后恢复。多次点击不会创建多个窗口。
+
 五、投递统计面板
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 按钮下方实时显示6项统计数据：
@@ -653,6 +661,41 @@ class BossGUI:
         help_text.config(state="disabled")  # 只读
 
         ttk.Button(help_win, text="关闭", command=help_win.destroy).pack(pady=8)
+
+    # ============ 每日资讯 ============
+    def _fetch_news(self):
+        """子线程抓取每日资讯，结果弹独立窗口展示，不影响投递和主界面"""
+        self.btn_news.config(state="disabled", text="抓取中...")
+
+        def _worker():
+            try:
+                report = build_report()
+                self.root.after(0, lambda: self._show_news_win(report))
+            except Exception as e:
+                self.root.after(0, lambda: self.btn_news.config(state="normal", text="每日资讯"))
+                self.root.after(0, lambda: messagebox.showerror("资讯抓取失败", str(e)))
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+    def _show_news_win(self, report):
+        """在独立窗口中展示资讯内容"""
+        self.btn_news.config(state="normal", text="每日资讯")
+        # 若已有资讯窗口先销毁，防止重复点击创建多个
+        if self._news_win is not None and self._news_win.winfo_exists():
+            self._news_win.destroy()
+        win = tk.Toplevel(self.root)
+        self._news_win = win
+        win.title("每日科技资讯")
+        win.geometry("720x640")
+        win.resizable(True, True)
+
+        txt = scrolledtext.ScrolledText(win, wrap="word", font=("Microsoft YaHei UI", 10), padx=10, pady=8)
+        txt.pack(fill="both", expand=True, padx=5, pady=5)
+        txt.insert("1.0", report)
+        txt.config(state="disabled")
+
+        ttk.Button(win, text="关闭", command=win.destroy).pack(pady=8)
 
     # ============ 配置持久化 ============
     def _load_applied_companies(self):
