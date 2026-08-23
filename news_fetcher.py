@@ -227,8 +227,21 @@ def clean_text(s):
     return s
 
 
-def get_text(url, headers=None, timeout=TIMEOUT):
-    return requests.get(url, headers=headers or HEADERS, timeout=timeout)
+def get_text(url, headers=None, timeout=TIMEOUT, retries=2, retry_delay=1):
+    """带SSL重试的GET请求，SSL断连时自动重试，可自定义重试次数和间隔"""
+    for attempt in range(retries + 1):
+        try:
+            return requests.get(url, headers=headers or HEADERS, timeout=timeout)
+        except requests.exceptions.SSLError:
+            if attempt < retries:
+                time.sleep(retry_delay)
+                continue
+            raise
+        except Exception:
+            if attempt < retries:
+                time.sleep(retry_delay)
+                continue
+            raise
 
 
 def fetch_github_top(n=10, days=30):
@@ -280,36 +293,44 @@ def is_tech(title, desc):
     return False
 
 
+def _fetch_hn_item(tid):
+    """并发获取单个HN item详情，返回处理后的dict或None"""
+    try:
+        ir = get_text(SOURCE_HN_ITEM.format(id=tid), timeout=5, retries=1, retry_delay=0.5)
+        if ir.status_code != 200:
+            return None
+        item = ir.json()
+        title = item.get("title", "")
+        if not title or not is_tech(title, item.get("text", "")):
+            return None
+        raw_text = clean_text(item.get("text") or "")
+        raw_text = re.sub(r'https?://\S+', '', raw_text).strip()
+        return {
+            "title": title,
+            "desc": raw_text[:150],
+            "link": item.get("url") or f"https://news.ycombinator.com/item?id={tid}",
+        }
+    except Exception:
+        return None
+
+
 def fetch_hn(n=10):
-    """Hacker News：Top stories（严格过滤非技术内容）"""
+    """Hacker News：Top stories（严格过滤非技术内容）
+    并发请求item详情，SSL断连时单个失败不影响整体"""
     items = []
     try:
         r = get_text(SOURCE_HN)
         if r.status_code != 200:
             return items, f"HTTP {r.status_code}"
         top_ids = r.json()[:n * 3]
-        for tid in top_ids:
-            try:
-                ir = get_text(SOURCE_HN_ITEM.format(id=tid))
-                if ir.status_code != 200:
-                    continue
-                item = ir.json()
-                title = item.get("title", "")
-                if not title or not is_tech(title, item.get("text", "")):
-                    continue
-                # desc：清理HTML后去掉纯URL行，只保留文本摘要
-                raw_text = clean_text(item.get("text") or "")
-                # 去掉拼接在一起的URL（https://... 连到下一个链接）
-                raw_text = re.sub(r'https?://\S+', '', raw_text).strip()
-                items.append({
-                    "title": title,
-                    "desc": raw_text[:150],
-                    "link": item.get("url") or f"https://news.ycombinator.com/item?id={tid}",
-                })
+        # 并发请求所有item详情
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            results = list(pool.map(_fetch_hn_item, top_ids))
+        for item in results:
+            if item:
+                items.append(item)
                 if len(items) >= n:
                     break
-            except Exception:
-                continue
         return items, "OK"
     except Exception as e:
         return items, f"{type(e).__name__}: {e}"
